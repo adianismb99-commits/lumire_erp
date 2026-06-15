@@ -5,17 +5,14 @@ from routes import productos, ventas, inventario, empleados, reportes
 
 app = FastAPI(title="LUMIRE ERP API", version="1.0.0")
 
-# CORS para permitir conexión desde el frontend
+# CORS - configuracion completa
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://lumire-erp-frontend.onrender.com",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Incluir rutas
@@ -33,7 +30,6 @@ def root():
 def health():
     return {"status": "ok"}
 
-# Ruta de login
 @app.post("/api/login")
 def login(usuario: dict):
     from auth import authenticate_user, create_access_token
