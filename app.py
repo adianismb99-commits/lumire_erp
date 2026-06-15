@@ -38,6 +38,32 @@ def login(usuario: dict):
     
     access_token = create_access_token(data={"sub": str(user["id"])})
     return {"access_token": access_token, "token_type": "bearer", "user": user}
+
+from auth import get_password_hash
+
+@app.post("/api/usuarios/register")
+def register_usuario(usuario: dict, current_user=Depends(get_current_user)):
+    # Solo SUPER_ADMIN puede crear usuarios
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Hashear la contraseña
+    hashed = get_password_hash(usuario.get("password"))
+    
+    # Crear usuario
+    nuevo = supabase.table("usuarios").insert({
+        "empresa_id": usuario.get("empresa_id", 1),
+        "nombre": usuario.get("nombre"),
+        "email": usuario.get("email"),
+        "password_hash": hashed,
+        "rol_id": usuario.get("rol_id")
+    }).execute()
+    
+    return {"message": "Usuario creado", "id": nuevo.data[0]["id"]}
+
 @app.get("/keepalive")
 def keepalive():
     try:
