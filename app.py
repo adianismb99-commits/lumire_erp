@@ -87,3 +87,12 @@ def keepalive():
     except Exception as e:
         print(f"Keepalive error: {e}")
         return {"status": "error", "detail": str(e)}, 500
+    
+@app.get("/api/usuarios/public")
+def get_usuarios_public():
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Solo devolver id, nombre, email (sin datos sensibles)
+    usuarios = supabase.table("usuarios").select("id, nombre, email").execute()
+    return usuarios.data
