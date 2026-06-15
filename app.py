@@ -41,6 +41,18 @@ def login(usuario: dict):
 
 from auth import get_password_hash
 
+@app.get("/api/usuarios/")
+def get_usuarios(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Solo SUPER_ADMIN o GERENTE pueden ver usuarios
+    if current_user["rol_id"] not in [1, 4]:  # 1=SUPER_ADMIN, 4=GERENTE
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id, activo").execute()
+    return usuarios.data
+
 @app.post("/api/usuarios/register")
 def register_usuario(usuario: dict, current_user=Depends(get_current_user)):
     # Solo SUPER_ADMIN puede crear usuarios
