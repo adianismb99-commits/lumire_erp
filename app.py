@@ -38,3 +38,14 @@ def login(usuario: dict):
     
     access_token = create_access_token(data={"sub": str(user["id"])})
     return {"access_token": access_token, "token_type": "bearer", "user": user}
+@app.get("/keepalive")
+def keepalive():
+    try:
+        from database import get_supabase
+        supabase = get_supabase()
+        # Consulta mínima a la base de datos para mantenerla activa
+        supabase.table("empresas").select("id").limit(1).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Keepalive error: {e}")
+        return {"status": "error", "detail": str(e)}, 500
