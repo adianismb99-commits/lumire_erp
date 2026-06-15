@@ -8,7 +8,11 @@ app = FastAPI(title="LUMIRE ERP API", version="1.0.0")
 # CORS para permitir conexión desde el frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://lumire-erp-frontend.onrender.com",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
