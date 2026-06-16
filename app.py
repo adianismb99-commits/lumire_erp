@@ -92,9 +92,7 @@ def keepalive():
 def get_usuarios_public():
     from database import get_supabase
     supabase = get_supabase()
-    
-    # Solo devolver id, nombre, email (sin datos sensibles)
-    usuarios = supabase.table("usuarios").select("id, nombre, email").execute()
+    usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id").execute()
     return usuarios.data
 
 @app.put("/api/usuarios/{usuario_id}")
