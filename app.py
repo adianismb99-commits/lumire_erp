@@ -143,3 +143,31 @@ def delete_usuario(usuario_id: int, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
     return {"message": "Usuario eliminado"}
+
+@app.post("/api/usuarios/{usuario_id}/cambiar-pass")
+def cambiar_password(usuario_id: int, data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    from auth import verify_password, get_password_hash
+    supabase = get_supabase()
+    
+    # Verificar que el usuario existe
+    user = supabase.table("usuarios").select("*").eq("id", usuario_id).execute()
+    if not user.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    user_data = user.data[0]
+    
+    # Si es el mismo usuario, verificar contraseña actual
+    if current_user["id"] == usuario_id:
+        if not verify_password(data.get("pass_antigua"), user_data["password_hash"]):
+            raise HTTPException(status_code=400, detail="Contraseña actual incorrecta")
+    else:
+        # Solo SUPER_ADMIN puede cambiar contraseña de otros sin verificar la actual
+        if current_user["rol_id"] != 1:
+            raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    # Hashear y guardar nueva contraseña
+    nueva_password = get_password_hash(data.get("pass_nueva"))
+    supabase.table("usuarios").update({"password_hash": nueva_password}).eq("id", usuario_id).execute()
+    
+    return {"message": "Contraseña actualizada"}
