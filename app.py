@@ -96,3 +96,50 @@ def get_usuarios_public():
     # Solo devolver id, nombre, email (sin datos sensibles)
     usuarios = supabase.table("usuarios").select("id, nombre, email").execute()
     return usuarios.data
+
+@app.put("/api/usuarios/{usuario_id}")
+def update_usuario(usuario_id: int, usuario: dict, current_user=Depends(get_current_user)):
+    # Solo SUPER_ADMIN puede editar
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    update_data = {
+        "nombre": usuario.get("nombre"),
+        "email": usuario.get("email"),
+        "rol_id": usuario.get("rol_id")
+    }
+    
+    # Si se envió contraseña, hashearla
+    if usuario.get("password"):
+        from auth import get_password_hash
+        update_data["password_hash"] = get_password_hash(usuario.get("password"))
+    
+    result = supabase.table("usuarios").update(update_data).eq("id", usuario_id).execute()
+    
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    return {"message": "Usuario actualizado"}
+
+@app.delete("/api/usuarios/{usuario_id}")
+def delete_usuario(usuario_id: int, current_user=Depends(get_current_user)):
+    # Solo SUPER_ADMIN puede eliminar
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    # No permitir eliminar el propio usuario
+    if usuario_id == current_user["id"]:
+        raise HTTPException(status_code=400, detail="No puedes eliminar tu propio usuario")
+    
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    result = supabase.table("usuarios").delete().eq("id", usuario_id).execute()
+    
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    return {"message": "Usuario eliminado"}
