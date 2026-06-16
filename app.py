@@ -61,19 +61,11 @@ def login(usuario: dict):
     return {"access_token": access_token, "token_type": "bearer", "user": user}
 
 @app.get("/api/usuarios/public")
-def get_usuarios_public(current_user=Depends(get_current_user)):
+def get_usuarios_public():
     from database import get_supabase
     supabase = get_supabase()
-    
-    # Solo usuarios de la misma empresa
-    usuarios = supabase.table("usuarios")\
-        .select("id, nombre, email, rol_id")\
-        .eq("empresa_id", current_user["empresa_id"])\
-        .execute()
-    
-    # Ocultar admin global
+    usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id, empresa_id").execute()
     usuarios_filtrados = [u for u in usuarios.data if u.get("email") != "admin@lumire.com"]
-    
     return usuarios_filtrados
 
 @app.get("/api/usuarios/")
