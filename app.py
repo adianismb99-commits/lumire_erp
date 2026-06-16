@@ -92,8 +92,14 @@ def keepalive():
 def get_usuarios_public():
     from database import get_supabase
     supabase = get_supabase()
+    
+    # Obtener todos los usuarios
     usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id").execute()
-    return usuarios.data
+    
+    # Filtrar para ocultar al admin
+    usuarios_filtrados = [u for u in usuarios.data if u.get("email") != "admin@lumire.com"]
+    
+    return usuarios_filtrados
 
 @app.put("/api/usuarios/{usuario_id}")
 def update_usuario(usuario_id: int, usuario: dict, current_user=Depends(get_current_user)):
