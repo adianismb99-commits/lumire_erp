@@ -187,6 +187,18 @@ def cambiar_password(usuario_id: int, data: dict, current_user=Depends(get_curre
     
     return {"message": "Contraseña actualizada"}
 
+@app.get("/api/ventas/")
+def get_ventas(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    ventas = supabase.table("ventas")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
+    return ventas.data
+
 @app.get("/keepalive")
 def keepalive():
     try:
