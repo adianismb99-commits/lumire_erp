@@ -216,10 +216,14 @@ RECOVERY_ALGORITHM = "HS256"
 RECOVERY_EXPIRE_MINUTES = 60
 
 @app.post("/api/auth/forgot-password")
-def forgot_password(email: str):
+def forgot_password(request: dict):
+    email = request.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email es requerido")
+    
     from database import get_supabase
     supabase = get_supabase()
-    
+        
     # Buscar usuario
     user = supabase.table("usuarios").select("id, email").eq("email", email).execute()
     if not user.data:
@@ -408,7 +412,3 @@ def verify_2fa(temporal_token: str, codigo: str):
     })
     
     return {"access_token": access_token, "token_type": "bearer", "user": user}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
