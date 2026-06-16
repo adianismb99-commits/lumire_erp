@@ -1,3 +1,9 @@
+import os
+import random
+from datetime import datetime, timedelta
+from jose import jwt
+from fastapi import HTTPException, Depends
+from notificaciones import enviar_correo, enviar_sms
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from auth import get_current_user, has_permission, authenticate_user, create_access_token
@@ -200,3 +206,209 @@ def keepalive():
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}, 500
+    
+# ============================================
+# RECUPERACIÓN DE CONTRASEÑA
+# ============================================
+
+RECOVERY_SECRET = "otro-secreto-para-recuperacion"  # Cámbialo en producción
+RECOVERY_ALGORITHM = "HS256"
+RECOVERY_EXPIRE_MINUTES = 60
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(email: str):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Buscar usuario
+    user = supabase.table("usuarios").select("id, email").eq("email", email).execute()
+    if not user.data:
+        # Por seguridad, devolvemos el mismo mensaje aunque no exista
+        return {"message": "Si el correo existe, recibirás un enlace para restablecer tu contraseña"}
+    
+    user_id = user.data[0]["id"]
+    
+    # Generar token JWT
+    token_data = {
+        "sub": str(user_id), 
+        "exp": datetime.utcnow() + timedelta(minutes=RECOVERY_EXPIRE_MINUTES)
+    }
+    token = jwt.encode(token_data, RECOVERY_SECRET, algorithm=RECOVERY_ALGORITHM)
+    
+    # Guardar token en la tabla tokens_recuperacion
+    supabase.table("tokens_recuperacion").insert({
+        "usuario_id": user_id,
+        "token": token,
+        "expira_en": (datetime.utcnow() + timedelta(minutes=RECOVERY_EXPIRE_MINUTES)).isoformat()
+    }).execute()
+    
+    # Construir enlace
+    frontend_url = os.getenv("FRONTEND_URL", "https://lumire-erp-frontend.onrender.com")
+    enlace = f"{frontend_url}/reset-password?token={token}"
+    
+    cuerpo = f"""
+    <h2>Recuperación de Contraseña - LUMIRE ERP</h2>
+    <p>Haz clic en el siguiente enlace para restablecer tu contraseña:</p>
+    <a href="{enlace}">{enlace}</a>
+    <p>Este enlace expirará en {RECOVERY_EXPIRE_MINUTES} minutos.</p>
+    <p>Si no solicitaste este cambio, ignora este correo.</p>
+    """
+    
+    enviar_correo(email, "Recuperación de Contraseña - LUMIRE ERP", cuerpo)
+    
+    return {"message": "Correo enviado correctamente"}
+
+@app.post("/api/auth/reset-password")
+def reset_password(token: str, new_password: str):
+    from database import get_supabase
+    from auth import get_password_hash
+    supabase = get_supabase()
+    
+    try:
+        payload = jwt.decode(token, RECOVERY_SECRET, algorithms=[RECOVERY_ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Token inválido")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="El enlace ha expirado")
+    except jwt.JWTError:
+        raise HTTPException(status_code=400, detail="Token inválido")
+    
+    # Verificar que el token no haya sido usado
+    token_record = supabase.table("tokens_recuperacion").select("*").eq("token", token).eq("usado", False).execute()
+    if not token_record.data:
+        raise HTTPException(status_code=400, detail="Token ya usado o inválido")
+    
+    # Actualizar contraseña
+    hashed = get_password_hash(new_password)
+    supabase.table("usuarios").update({"password_hash": hashed}).eq("id", user_id).execute()
+    
+    # Marcar token como usado
+    supabase.table("tokens_recuperacion").update({"usado": True}).eq("token", token).execute()
+    
+    return {"message": "Contraseña actualizada correctamente"}
+
+@app.post("/api/auth/enable-2fa")
+def enable_2fa(metodo: str, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Generar código OTP de 6 dígitos
+    codigo = str(random.randint(100000, 999999))
+    expira = datetime.utcnow() + timedelta(minutes=5)
+    
+    # Guardar en tabla codigos_otp
+    supabase.table("codigos_otp").insert({
+        "usuario_id": current_user["id"],
+        "codigo": codigo,
+        "metodo": metodo,
+        "expira_en": expira.isoformat(),
+        "usado": False
+    }).execute()
+    
+    # Enviar código por el método elegido
+    if metodo == "email":
+        enviar_correo(current_user["email"], "Código de verificación LUMIRE ERP", f"Tu código de verificación es: <b>{codigo}</b>")
+    elif metodo == "sms":
+        telefono = current_user.get("telefono")
+        if not telefono:
+            raise HTTPException(status_code=400, detail="No tienes un número de teléfono registrado")
+        enviar_sms(telefono, f"Tu código de verificación LUMIRE ERP es: {codigo}")
+    else:
+        raise HTTPException(status_code=400, detail="Método no válido")
+    
+    return {"message": f"Código enviado por {metodo}"}
+
+@app.post("/api/auth/confirm-2fa")
+def confirm_2fa(codigo: str, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    now = datetime.utcnow().isoformat()
+    record = supabase.table("codigos_otp")\
+        .select("*")\
+        .eq("usuario_id", current_user["id"])\
+        .eq("codigo", codigo)\
+        .eq("usado", False)\
+        .gte("expira_en", now)\
+        .execute()
+    
+    if not record.data:
+        raise HTTPException(status_code=400, detail="Código inválido o expirado")
+    
+    # Activar 2FA
+    supabase.table("usuarios").update({
+        "2fa_habilitado": True,
+        "2fa_metodo": record.data[0]["metodo"],
+        "ultima_verificacion_2fa": datetime.utcnow().isoformat()
+    }).eq("id", current_user["id"]).execute()
+    
+    # Marcar código como usado
+    supabase.table("codigos_otp").update({"usado": True}).eq("id", record.data[0]["id"]).execute()
+    
+    return {"message": "2FA activado correctamente"}
+
+@app.post("/api/auth/disable-2fa")
+def disable_2fa(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    supabase.table("usuarios").update({
+        "2fa_habilitado": False,
+        "2fa_metodo": None
+    }).eq("id", current_user["id"]).execute()
+    
+    return {"message": "2FA desactivado"}
+
+@app.post("/api/auth/verify-2fa")
+def verify_2fa(temporal_token: str, codigo: str):
+    from database import get_supabase
+    from auth import create_access_token
+    supabase = get_supabase()
+    
+    # Validar temporal_token
+    try:
+        payload = jwt.decode(temporal_token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not payload.get("temporal"):
+            raise HTTPException(status_code=400, detail="Token inválido")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="El tiempo para verificar ha expirado")
+    except jwt.JWTError:
+        raise HTTPException(status_code=400, detail="Token inválido")
+    
+    # Buscar código OTP válido
+    now = datetime.utcnow().isoformat()
+    record = supabase.table("codigos_otp")\
+        .select("*")\
+        .eq("usuario_id", user_id)\
+        .eq("codigo", codigo)\
+        .eq("usado", False)\
+        .gte("expira_en", now)\
+        .execute()
+    
+    if not record.data:
+        raise HTTPException(status_code=400, detail="Código inválido o expirado")
+    
+    # Marcar código como usado
+    supabase.table("codigos_otp").update({"usado": True}).eq("id", record.data[0]["id"]).execute()
+    
+    # Actualizar última verificación
+    supabase.table("usuarios").update({
+        "ultima_verificacion_2fa": datetime.utcnow().isoformat()
+    }).eq("id", user_id).execute()
+    
+    # Obtener usuario
+    user = supabase.table("usuarios").select("*").eq("id", user_id).execute().data[0]
+    
+    # Generar token final
+    access_token = create_access_token(data={
+        "sub": str(user["id"]),
+        "empresa_id": user["empresa_id"]
+    })
+    
+    return {"access_token": access_token, "token_type": "bearer", "user": user}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
