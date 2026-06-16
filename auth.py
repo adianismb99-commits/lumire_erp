@@ -19,21 +19,13 @@ def get_password_hash(password):
     return pwd_context.hash(password)
 
 def authenticate_user(email: str, password: str):
-    print(f"Intentando login con email: {email}")  # <-- Agrega esto
     supabase = get_supabase()
     user = supabase.table("usuarios").select("*").eq("email", email).execute()
     
-    print(f"Usuario encontrado: {user.data}")  # <-- Agrega esto
-    
     if not user.data:
-        print("Usuario no encontrado")
         return False
     user_data = user.data[0]
-    
-    print(f"Contraseña guardada: {user_data['password_hash']}")  # <-- Agrega esto
-    
     if not verify_password(password, user_data["password_hash"]):
-        print("Contraseña incorrecta")
         return False
     return user_data
 
@@ -52,6 +44,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: int = payload.get("sub")
+        empresa_id: int = payload.get("empresa_id")
         if user_id is None:
             raise HTTPException(status_code=401, detail="Token inválido")
     except JWTError:
@@ -62,7 +55,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if not user.data:
         raise HTTPException(status_code=401, detail="Usuario no encontrado")
     
-    return user.data[0]
+    user_data = user.data[0]
+    user_data["empresa_id"] = empresa_id  # Forzar empresa desde el token
+    
+    return user_data
 
 def has_permission(user, modulo: str, accion: str):
     supabase = get_supabase()

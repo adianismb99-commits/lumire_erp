@@ -8,23 +8,31 @@ router = APIRouter()
 @router.get("/")
 def get_ventas(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    ventas = supabase.table("ventas").select("*").execute()
+    ventas = supabase.table("ventas")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
     return ventas.data
 
 @router.post("/")
 def create_venta(venta: VentaCreate, current_user=Depends(get_current_user)):
     if not has_permission(current_user, "ventas", "crear"):
         raise HTTPException(status_code=403, detail="Sin permiso")
+    
     supabase = get_supabase()
     total = sum(d.cantidad * d.precio_unitario for d in venta.detalles)
+    
     nueva_venta = supabase.table("ventas").insert({
         "sesion_caja_id": venta.sesion_caja_id,
         "cliente_nombre": venta.cliente_nombre,
         "metodo_pago": venta.metodo_pago,
         "total": total,
-        "estado": "completada"
+        "estado": "completada",
+        "empresa_id": current_user["empresa_id"]
     }).execute()
+    
     venta_id = nueva_venta.data[0]["id"]
+    
     for detalle in venta.detalles:
         supabase.table("ventas_detalle").insert({
             "venta_id": venta_id,
@@ -33,4 +41,5 @@ def create_venta(venta: VentaCreate, current_user=Depends(get_current_user)):
             "precio_unitario": detalle.precio_unitario,
             "subtotal": detalle.cantidad * detalle.precio_unitario
         }).execute()
+    
     return nueva_venta.data[0]

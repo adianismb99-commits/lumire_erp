@@ -1,20 +1,27 @@
 from fastapi import APIRouter, Depends, HTTPException
 from database import get_supabase
 from auth import get_current_user, has_permission
-from models import ProductoCreate, ProductoResponse
+from models import ProductoCreate
 
 router = APIRouter()
 
 @router.get("/")
 def get_productos(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    productos = supabase.table("productos").select("*").eq("empresa_id", current_user["empresa_id"]).execute()
+    productos = supabase.table("productos")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
     return productos.data
 
 @router.get("/{producto_id}")
 def get_producto(producto_id: int, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    producto = supabase.table("productos").select("*").eq("id", producto_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    producto = supabase.table("productos")\
+        .select("*")\
+        .eq("id", producto_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
     if not producto.data:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return producto.data[0]
@@ -37,7 +44,11 @@ def update_producto(producto_id: int, producto: dict, current_user=Depends(get_c
         raise HTTPException(status_code=403, detail="Sin permiso")
     
     supabase = get_supabase()
-    updated = supabase.table("productos").update(producto).eq("id", producto_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    updated = supabase.table("productos")\
+        .update(producto)\
+        .eq("id", producto_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
     if not updated.data:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return updated.data[0]

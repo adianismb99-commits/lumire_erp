@@ -1,11 +1,11 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from auth import get_current_user, has_permission
+from auth import get_current_user, has_permission, authenticate_user, create_access_token
 from routes import productos, ventas, inventario, empleados, reportes
 
 app = FastAPI(title="LUMIRE ERP API", version="1.0.0")
 
-# CORS - configuracion completa
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://lumire-erp-frontend.onrender.com", "http://localhost:8000"],
@@ -29,45 +29,78 @@ def root():
 def health():
     return {"status": "ok"}
 
+@app.get("/api/empresas")
+def get_empresas():
+    from database import get_supabase
+    supabase = get_supabase()
+    empresas = supabase.table("empresas").select("id, nombre").execute()
+    return empresas.data
+
 @app.post("/api/login")
 def login(usuario: dict):
-    from auth import authenticate_user, create_access_token
-    user = authenticate_user(usuario.get("email"), usuario.get("password"))
+    email = usuario.get("email")
+    password = usuario.get("password")
+    empresa_id = usuario.get("empresa_id")
+    
+    user = authenticate_user(email, password)
     if not user:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     
-    access_token = create_access_token(data={"sub": str(user["id"])})
+    # Verificar que el usuario pertenece a la empresa seleccionada
+    if user["empresa_id"] != empresa_id:
+        raise HTTPException(status_code=401, detail="Usuario no pertenece a esta empresa")
+    
+    access_token = create_access_token(data={
+        "sub": str(user["id"]),
+        "empresa_id": empresa_id
+    })
+    
     return {"access_token": access_token, "token_type": "bearer", "user": user}
 
-from auth import get_password_hash
+@app.get("/api/usuarios/public")
+def get_usuarios_public(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Solo usuarios de la misma empresa
+    usuarios = supabase.table("usuarios")\
+        .select("id, nombre, email, rol_id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
+    # Ocultar admin global
+    usuarios_filtrados = [u for u in usuarios.data if u.get("email") != "admin@lumire.com"]
+    
+    return usuarios_filtrados
 
 @app.get("/api/usuarios/")
 def get_usuarios(current_user=Depends(get_current_user)):
     from database import get_supabase
     supabase = get_supabase()
     
-    # Solo SUPER_ADMIN o GERENTE pueden ver usuarios
-    if current_user["rol_id"] not in [1, 4]:  # 1=SUPER_ADMIN, 4=GERENTE
+    if current_user["rol_id"] not in [1, 4]:
         raise HTTPException(status_code=403, detail="Sin permiso")
     
-    usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id, activo").execute()
+    usuarios = supabase.table("usuarios")\
+        .select("id, nombre, email, rol_id, activo")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
     return usuarios.data
 
 @app.post("/api/usuarios/register")
 def register_usuario(usuario: dict, current_user=Depends(get_current_user)):
-    # Solo SUPER_ADMIN puede crear usuarios
     if current_user["rol_id"] != 1:
         raise HTTPException(status_code=403, detail="Sin permiso")
     
     from database import get_supabase
+    from auth import get_password_hash
     supabase = get_supabase()
     
-    # Hashear la contraseña
     hashed = get_password_hash(usuario.get("password"))
     
-    # Crear usuario
     nuevo = supabase.table("usuarios").insert({
-        "empresa_id": usuario.get("empresa_id", 1),
+        "empresa_id": current_user["empresa_id"],
         "nombre": usuario.get("nombre"),
         "email": usuario.get("email"),
         "password_hash": hashed,
@@ -76,34 +109,8 @@ def register_usuario(usuario: dict, current_user=Depends(get_current_user)):
     
     return {"message": "Usuario creado", "id": nuevo.data[0]["id"]}
 
-@app.get("/keepalive")
-def keepalive():
-    try:
-        from database import get_supabase
-        supabase = get_supabase()
-        # Consulta mínima a la base de datos para mantenerla activa
-        supabase.table("empresas").select("id").limit(1).execute()
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"Keepalive error: {e}")
-        return {"status": "error", "detail": str(e)}, 500
-    
-@app.get("/api/usuarios/public")
-def get_usuarios_public():
-    from database import get_supabase
-    supabase = get_supabase()
-    
-    # Obtener todos los usuarios
-    usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id").execute()
-    
-    # Filtrar para ocultar al admin
-    usuarios_filtrados = [u for u in usuarios.data if u.get("email") != "admin@lumire.com"]
-    
-    return usuarios_filtrados
-
 @app.put("/api/usuarios/{usuario_id}")
 def update_usuario(usuario_id: int, usuario: dict, current_user=Depends(get_current_user)):
-    # Solo SUPER_ADMIN puede editar
     if current_user["rol_id"] != 1:
         raise HTTPException(status_code=403, detail="Sin permiso")
     
@@ -116,12 +123,15 @@ def update_usuario(usuario_id: int, usuario: dict, current_user=Depends(get_curr
         "rol_id": usuario.get("rol_id")
     }
     
-    # Si se envió contraseña, hashearla
     if usuario.get("password"):
         from auth import get_password_hash
         update_data["password_hash"] = get_password_hash(usuario.get("password"))
     
-    result = supabase.table("usuarios").update(update_data).eq("id", usuario_id).execute()
+    result = supabase.table("usuarios")\
+        .update(update_data)\
+        .eq("id", usuario_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
     
     if not result.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -130,18 +140,20 @@ def update_usuario(usuario_id: int, usuario: dict, current_user=Depends(get_curr
 
 @app.delete("/api/usuarios/{usuario_id}")
 def delete_usuario(usuario_id: int, current_user=Depends(get_current_user)):
-    # Solo SUPER_ADMIN puede eliminar
     if current_user["rol_id"] != 1:
         raise HTTPException(status_code=403, detail="Sin permiso")
     
-    # No permitir eliminar el propio usuario
     if usuario_id == current_user["id"]:
         raise HTTPException(status_code=400, detail="No puedes eliminar tu propio usuario")
     
     from database import get_supabase
     supabase = get_supabase()
     
-    result = supabase.table("usuarios").delete().eq("id", usuario_id).execute()
+    result = supabase.table("usuarios")\
+        .delete()\
+        .eq("id", usuario_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
     
     if not result.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -154,24 +166,30 @@ def cambiar_password(usuario_id: int, data: dict, current_user=Depends(get_curre
     from auth import verify_password, get_password_hash
     supabase = get_supabase()
     
-    # Verificar que el usuario existe
-    user = supabase.table("usuarios").select("*").eq("id", usuario_id).execute()
+    user = supabase.table("usuarios").select("*").eq("id", usuario_id).eq("empresa_id", current_user["empresa_id"]).execute()
     if not user.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
     user_data = user.data[0]
     
-    # Si es el mismo usuario, verificar contraseña actual
     if current_user["id"] == usuario_id:
         if not verify_password(data.get("pass_antigua"), user_data["password_hash"]):
             raise HTTPException(status_code=400, detail="Contraseña actual incorrecta")
     else:
-        # Solo SUPER_ADMIN puede cambiar contraseña de otros sin verificar la actual
         if current_user["rol_id"] != 1:
             raise HTTPException(status_code=403, detail="Sin permiso")
     
-    # Hashear y guardar nueva contraseña
     nueva_password = get_password_hash(data.get("pass_nueva"))
     supabase.table("usuarios").update({"password_hash": nueva_password}).eq("id", usuario_id).execute()
     
     return {"message": "Contraseña actualizada"}
+
+@app.get("/keepalive")
+def keepalive():
+    try:
+        from database import get_supabase
+        supabase = get_supabase()
+        supabase.table("empresas").select("id").limit(1).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}, 500
