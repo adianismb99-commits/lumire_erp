@@ -5,13 +5,18 @@ from routes import productos, ventas, inventario, empleados, reportes
 
 app = FastAPI(title="LUMIRE ERP API", version="1.0.0")
 
-# CORS
+# ========== CORS - DEBE ESTAR ANTES DE LAS RUTAS ==========
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://lumire-erp-frontend.onrender.com", "http://localhost:8000"],
+    allow_origins=[
+        "https://lumire-erp-frontend.onrender.com",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Incluir rutas
