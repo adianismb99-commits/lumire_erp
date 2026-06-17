@@ -28,8 +28,8 @@ def enviar_correo(destinatario: str, asunto: str, cuerpo: str):
         msg['To'] = destinatario
         msg['Subject'] = asunto
         msg.attach(MIMEText(cuerpo, 'html'))
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
-        server.starttls()
+        # Para puerto 465 (SSL directo)
+        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT)
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
         server.quit()
