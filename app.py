@@ -3,7 +3,7 @@ import random
 from datetime import datetime, timedelta
 from jose import jwt
 from fastapi import HTTPException, Depends
-from notificaciones import enviar_correo, enviar_sms
+from notificaciones import enviar_correo
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from auth import get_current_user, has_permission, authenticate_user, create_access_token
@@ -223,7 +223,7 @@ def forgot_password(request: dict):
     
     from database import get_supabase
     supabase = get_supabase()
-        
+    
     # Buscar usuario
     user = supabase.table("usuarios").select("id, email").eq("email", email).execute()
     if not user.data:
