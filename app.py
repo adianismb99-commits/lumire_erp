@@ -42,7 +42,7 @@ def health():
 def get_empresas():
     from database import get_supabase
     supabase = get_supabase()
-    response = supabase.rpc("get_public_empresas").execute()
+    response = supabase.rpc("get_public_empresas", {}).execute()  # <-- Añadir {} como params
     return response.data
 
 @app.post("/api/login")
@@ -70,8 +70,9 @@ def login(usuario: dict):
 def get_usuarios_public():
     from database import get_supabase
     supabase = get_supabase()
-    response = supabase.rpc("get_public_users").execute()
-    return response.data
+    response = supabase.rpc("get_public_users", {}).execute()  # <-- Añadir {} como params
+    usuarios_filtrados = [u for u in response.data if u.get("email") != "admin@lumire.com"]
+    return usuarios_filtrados
 
 @app.get("/api/usuarios/")
 def get_usuarios(current_user=Depends(get_current_user)):
