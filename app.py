@@ -42,8 +42,8 @@ def health():
 def get_empresas():
     from database import get_supabase
     supabase = get_supabase()
-    empresas = supabase.table("empresas").select("id, nombre").execute()
-    return empresas.data
+    response = supabase.rpc("get_public_empresas").execute()
+    return response.data
 
 @app.post("/api/login")
 def login(usuario: dict):
