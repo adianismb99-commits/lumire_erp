@@ -70,9 +70,8 @@ def login(usuario: dict):
 def get_usuarios_public():
     from database import get_supabase
     supabase = get_supabase()
-    usuarios = supabase.table("usuarios").select("id, nombre, email, rol_id, empresa_id").execute()
-    usuarios_filtrados = [u for u in usuarios.data if u.get("email") != "admin@lumire.com"]
-    return usuarios_filtrados
+    response = supabase.rpc("get_public_users").execute()
+    return response.data
 
 @app.get("/api/usuarios/")
 def get_usuarios(current_user=Depends(get_current_user)):
