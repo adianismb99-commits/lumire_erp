@@ -47,6 +47,8 @@ def get_empresas():
 
 @app.post("/api/login")
 def login(usuario: dict):
+    from auth import authenticate_user, create_access_token
+    
     email = usuario.get("email")
     password = usuario.get("password")
     empresa_id = usuario.get("empresa_id")
@@ -55,7 +57,6 @@ def login(usuario: dict):
     if not user:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     
-    # Verificar que el usuario pertenece a la empresa seleccionada
     if user["empresa_id"] != empresa_id:
         raise HTTPException(status_code=401, detail="Usuario no pertenece a esta empresa")
     
