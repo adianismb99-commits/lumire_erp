@@ -410,7 +410,7 @@ def verify_2fa(temporal_token: str, codigo: str):
     # Generar token final
     access_token = create_access_token(data={
         "sub": str(user["id"]),
-        "empresa_id": user["empresa_id"]
+        "empresa_id": user["empresa_id"],
         "role": user["rol_id"]
     })
     
