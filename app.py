@@ -63,6 +63,7 @@ def login(usuario: dict):
     access_token = create_access_token(data={
         "sub": str(user["id"]),
         "empresa_id": empresa_id
+        "role": user["rol_id"]
     })
     
     return {"access_token": access_token, "token_type": "bearer", "user": user}
@@ -410,6 +411,87 @@ def verify_2fa(temporal_token: str, codigo: str):
     access_token = create_access_token(data={
         "sub": str(user["id"]),
         "empresa_id": user["empresa_id"]
+        "role": user["rol_id"]
     })
     
     return {"access_token": access_token, "token_type": "bearer", "user": user}
+# ============================================
+# ENDPOINTS PARA RECETAS Y PRODUCCIÓN
+# ============================================
+
+@app.get("/api/recetas/")
+def get_recetas(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    recetas = supabase.table("recetas").select("*").execute()
+    return recetas.data
+
+@app.get("/api/recetas/{receta_id}/ingredientes")
+def get_receta_ingredientes(receta_id: int, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    # Obtener detalles de ingredientes
+    detalles = supabase.table("recetas_detalle").select("*, ingredientes(*)").eq("receta_id", receta_id).execute()
+    return detalles.data
+
+@app.get("/api/recetas/{receta_id}/calcular")
+def calcular_produccion(receta_id: int, cantidad: int, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Obtener receta con sus ingredientes
+    detalles = supabase.table("recetas_detalle").select("*, ingredientes(*)").eq("receta_id", receta_id).execute()
+    if not detalles.data:
+        return {"error": "No se encontraron ingredientes"}
+    
+    resultado = []
+    for detalle in detalles.data:
+        ing = detalle.get("ingredientes", {})
+        resultado.append({
+            "ingrediente_id": detalle["ingrediente_id"],
+            "ingrediente_nombre": ing.get("nombre", "Desconocido"),
+            "cantidad_por_unidad": detalle["cantidad"],
+            "unidad": detalle.get("unidad", "unidad"),
+            "cantidad_total": detalle["cantidad"] * cantidad
+        })
+    
+    return resultado
+
+@app.post("/api/produccion/")
+def registrar_produccion(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    receta_id = data.get("receta_id")
+    cantidad = data.get("cantidad_producir")
+    lote = data.get("lote")
+    fecha = data.get("fecha")
+    
+    if not receta_id or not cantidad or not lote:
+        raise HTTPException(status_code=400, detail="Faltan datos")
+    
+    # Obtener detalles de la receta
+    detalles = supabase.table("recetas_detalle").select("*, ingredientes(*)").eq("receta_id", receta_id).execute()
+    
+    # Registrar producción
+    nueva_produccion = supabase.table("produccion").insert({
+        "receta_id": receta_id,
+        "cantidad_teorica": cantidad,
+        "cantidad_real": cantidad,
+        "lote": lote,
+        "fecha_produccion": fecha or datetime.now().isoformat(),
+        "estado": "completada"
+    }).execute()
+    
+    # Descontar inventario
+    for detalle in detalles.data:
+        ing_id = detalle["ingrediente_id"]
+        cantidad_necesaria = detalle["cantidad"] * cantidad
+        # Obtener stock actual del ingrediente
+        stock = supabase.table("inventario").select("cantidad").eq("ingrediente_id", ing_id).execute()
+        if stock.data:
+            stock_actual = stock.data[0]["cantidad"]
+            nuevo_stock = stock_actual - cantidad_necesaria
+            supabase.table("inventario").update({"cantidad": nuevo_stock}).eq("ingrediente_id", ing_id).execute()
+    
+    return {"message": "Producción registrada", "lote": lote}
