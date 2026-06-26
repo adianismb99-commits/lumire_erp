@@ -615,8 +615,17 @@ def get_historial(ingrediente_id: int, current_user=Depends(get_current_user)):
     movimientos = supabase.table("movimientos_inventario").select("*").eq("ingrediente_id", ingrediente_id).eq("empresa_id", current_user["empresa_id"]).order("fecha", desc=True).execute()
     return movimientos.data
 # ============================================
-# ENDPOINTS PARA NÓMINA
+# ENDPOINTS PARA NÓMINA (con creación de usuario)
 # ============================================
+
+@app.get("/api/usuarios/{usuario_id}")
+def get_usuario(usuario_id: int, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    usuario = supabase.table("usuarios").select("*").eq("id", usuario_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not usuario.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return usuario.data[0]
 
 @app.get("/api/empleados/")
 def get_empleados(current_user=Depends(get_current_user)):
@@ -628,43 +637,109 @@ def get_empleados(current_user=Depends(get_current_user)):
 @app.post("/api/empleados/")
 def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
     from database import get_supabase
+    from auth import get_password_hash
+    import random
+    import string
+    
     supabase = get_supabase()
-    nuevo = supabase.table("empleados").insert({
-        "usuario_id": empleado.get("usuario_id"),
-        "tipo": empleado.get("tipo", "Empleado"),
-        "salario_base": empleado.get("salario_base", 0),
-        "comision_porcentaje": empleado.get("comision_porcentaje", 0),
-        "fecha_ingreso": empleado.get("fecha_ingreso"),
-        "empresa_id": current_user["empresa_id"]
+    
+    nombre = empleado.get("nombre")
+    email = empleado.get("email")
+    tipo = empleado.get("tipo", "Empleado")
+    salario_base = empleado.get("salario_base", 0)
+    comision_porcentaje = empleado.get("comision_porcentaje", 0)
+    fecha_ingreso = empleado.get("fecha_ingreso")
+    crear_usuario = empleado.get("crear_usuario", True)
+    empresa_id = current_user["empresa_id"]
+    
+    # Insertar empleado
+    nuevo_empleado = supabase.table("empleados").insert({
+        "nombre": nombre,
+        "email": email,
+        "tipo": tipo,
+        "salario_base": salario_base,
+        "comision_porcentaje": comision_porcentaje,
+        "fecha_ingreso": fecha_ingreso,
+        "empresa_id": empresa_id
     }).execute()
-    return nuevo.data[0]
+    
+    empleado_id = nuevo_empleado.data[0]["id"]
+    resultado = {"empleado_id": empleado_id, "usuario_creado": False}
+    
+    # Crear usuario automáticamente
+    if crear_usuario:
+        caracteres = string.ascii_letters + string.digits + "!@#$%^&*"
+        password = ''.join(random.choice(caracteres) for _ in range(10))
+        hashed = get_password_hash(password)
+        
+        existing = supabase.table("usuarios").select("id").eq("email", email).execute()
+        if existing.data:
+            resultado["usuario_creado"] = False
+            resultado["error"] = "El email ya está registrado"
+        else:
+            nuevo_usuario = supabase.table("usuarios").insert({
+                "empresa_id": empresa_id,
+                "nombre": nombre,
+                "email": email,
+                "password_hash": hashed,
+                "rol_id": 2,
+                "activo": True
+            }).execute()
+            
+            supabase.table("empleados").update({
+                "usuario_id": nuevo_usuario.data[0]["id"]
+            }).eq("id", empleado_id).execute()
+            
+            resultado["usuario_creado"] = True
+            resultado["usuario_id"] = nuevo_usuario.data[0]["id"]
+            resultado["usuario_email"] = email
+            resultado["usuario_password"] = password
+    
+    return resultado
 
 @app.put("/api/empleados/{empleado_id}")
 def update_empleado(empleado_id: int, empleado: dict, current_user=Depends(get_current_user)):
     from database import get_supabase
     supabase = get_supabase()
+    
     updated = supabase.table("empleados").update({
+        "nombre": empleado.get("nombre"),
+        "email": empleado.get("email"),
         "tipo": empleado.get("tipo", "Empleado"),
         "salario_base": empleado.get("salario_base", 0),
         "comision_porcentaje": empleado.get("comision_porcentaje", 0),
         "fecha_ingreso": empleado.get("fecha_ingreso")
     }).eq("id", empleado_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    
     if not updated.data:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    
     return updated.data[0]
 
 @app.delete("/api/empleados/{empleado_id}")
 def delete_empleado(empleado_id: int, current_user=Depends(get_current_user)):
     from database import get_supabase
     supabase = get_supabase()
+    
+    empleado = supabase.table("empleados").select("usuario_id").eq("id", empleado_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    
     result = supabase.table("empleados").delete().eq("id", empleado_id).eq("empresa_id", current_user["empresa_id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
-    return {"message": "Empleado eliminado"}
+    
+    if empleado.data and empleado.data[0].get("usuario_id"):
+        supabase.table("usuarios").delete().eq("id", empleado.data[0]["usuario_id"]).eq("empresa_id", current_user["empresa_id"]).execute()
+    
+    return {"message": "Empleado y usuario eliminado"}
+
+# ============================================
+# ENDPOINTS PARA ASISTENCIAS
+# ============================================
 
 @app.post("/api/asistencias/")
 def create_asistencia(data: dict, current_user=Depends(get_current_user)):
     from database import get_supabase
+    from datetime import datetime
     supabase = get_supabase()
     
     empleado_id = data.get("empleado_id")
@@ -675,7 +750,6 @@ def create_asistencia(data: dict, current_user=Depends(get_current_user)):
     if not empleado_id or not fecha or not hora_entrada or not hora_salida:
         raise HTTPException(status_code=400, detail="Faltan datos")
     
-    # Calcular horas trabajadas
     h1 = datetime.strptime(hora_entrada, "%H:%M")
     h2 = datetime.strptime(hora_salida, "%H:%M")
     horas = (h2 - h1).seconds / 3600
@@ -693,15 +767,32 @@ def create_asistencia(data: dict, current_user=Depends(get_current_user)):
 def get_asistencias(fecha: str, current_user=Depends(get_current_user)):
     from database import get_supabase
     supabase = get_supabase()
-    asistencias = supabase.table("asistencias").select("*, empleados(*)").eq("fecha", fecha).execute()
-    return asistencias.data
+    asistencias = supabase.table("asistencias").select("*, empleados(nombre)").eq("fecha", fecha).execute()
+    
+    # Transformar para incluir nombre del empleado
+    resultado = []
+    for a in asistencias.data:
+        emp = a.get("empleados", {})
+        resultado.append({
+            "id": a.get("id"),
+            "empleado_id": a.get("empleado_id"),
+            "empleado_nombre": emp.get("nombre") if emp else None,
+            "fecha": a.get("fecha"),
+            "hora_entrada": a.get("hora_entrada"),
+            "hora_salida": a.get("hora_salida"),
+            "horas_trabajadas": a.get("horas_trabajadas")
+        })
+    return resultado
+
+# ============================================
+# ENDPOINTS PARA NÓMINA (cálculo e historial)
+# ============================================
 
 @app.get("/api/nomina/calcular")
 def calcular_nomina(empleado_id: int, mes: str, current_user=Depends(get_current_user)):
     from database import get_supabase
     supabase = get_supabase()
     
-    # Obtener empleado
     empleado = supabase.table("empleados").select("*").eq("id", empleado_id).eq("empresa_id", current_user["empresa_id"]).execute()
     if not empleado.data:
         return {"error": "Empleado no encontrado"}
@@ -710,20 +801,17 @@ def calcular_nomina(empleado_id: int, mes: str, current_user=Depends(get_current
     salario_base = emp.get("salario_base", 0)
     comision_porcentaje = emp.get("comision_porcentaje", 0)
     
-    # Obtener asistencias del mes
     asistencias = supabase.table("asistencias").select("*").eq("empleado_id", empleado_id).like("fecha", f"{mes}%").execute()
     
-    # Calcular
     horas_totales = sum(a.get("horas_trabajadas", 0) for a in asistencias.data)
     dias_trabajados = len(asistencias.data)
     
-    # Valor por hora (asumiendo 8h por día, 22 días al mes)
     valor_hora = salario_base / 176 if salario_base > 0 else 0
     salario_devengado = horas_totales * valor_hora
     
     comisiones = salario_devengado * (comision_porcentaje / 100) if comision_porcentaje > 0 else 0
-    bonos = 0  # Pendiente de implementar
-    deducciones = 0  # Pendiente de implementar
+    bonos = 0
+    deducciones = 0
     
     total = salario_devengado + comisiones + bonos - deducciones
     
@@ -744,5 +832,4 @@ def calcular_nomina(empleado_id: int, mes: str, current_user=Depends(get_current
 def get_nomina_historial(mes: str, current_user=Depends(get_current_user)):
     from database import get_supabase
     supabase = get_supabase()
-    # Por ahora, devolvemos datos simulados
     return []
