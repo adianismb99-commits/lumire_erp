@@ -62,7 +62,7 @@ def login(usuario: dict):
     
     access_token = create_access_token(data={
         "sub": str(user["id"]),
-        "empresa_id": empresa_id
+        "empresa_id": empresa_id,
         "role": user["rol_id"]
     })
     
