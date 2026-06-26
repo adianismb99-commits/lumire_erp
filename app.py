@@ -495,3 +495,122 @@ def registrar_produccion(data: dict, current_user=Depends(get_current_user)):
             supabase.table("inventario").update({"cantidad": nuevo_stock}).eq("ingrediente_id", ing_id).execute()
     
     return {"message": "Producción registrada", "lote": lote}
+# ============================================
+# ENDPOINTS PARA INVENTARIO
+# ============================================
+
+@app.get("/api/ingredientes/")
+def get_ingredientes(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    ingredientes = supabase.table("ingredientes").select("*").execute()
+    return ingredientes.data
+
+@app.post("/api/ingredientes/")
+def create_ingrediente(ingrediente: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    nuevo = supabase.table("ingredientes").insert({
+        "nombre": ingrediente.get("nombre"),
+        "unidad": ingrediente.get("unidad", "unidad"),
+        "stock_minimo": ingrediente.get("stock_minimo", 0),
+        "stock_actual": ingrediente.get("stock_actual", 0),
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    return nuevo.data[0]
+
+@app.put("/api/ingredientes/{ingrediente_id}")
+def update_ingrediente(ingrediente_id: int, ingrediente: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    updated = supabase.table("ingredientes").update({
+        "nombre": ingrediente.get("nombre"),
+        "unidad": ingrediente.get("unidad", "unidad"),
+        "stock_minimo": ingrediente.get("stock_minimo", 0),
+        "stock_actual": ingrediente.get("stock_actual", 0)
+    }).eq("id", ingrediente_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not updated.data:
+        raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+    return updated.data[0]
+
+@app.delete("/api/ingredientes/{ingrediente_id}")
+def delete_ingrediente(ingrediente_id: int, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    result = supabase.table("ingredientes").delete().eq("id", ingrediente_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+    return {"message": "Ingrediente eliminado"}
+
+@app.post("/api/inventario/comprar")
+def registrar_compra(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    ingrediente_id = data.get("ingrediente_id")
+    cantidad = data.get("cantidad")
+    costo = data.get("costo", 0)
+    
+    if not ingrediente_id or not cantidad:
+        raise HTTPException(status_code=400, detail="Faltan datos")
+    
+    # Actualizar stock
+    ingrediente = supabase.table("ingredientes").select("stock_actual").eq("id", ingrediente_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not ingrediente.data:
+        raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+    
+    nuevo_stock = ingrediente.data[0]["stock_actual"] + cantidad
+    supabase.table("ingredientes").update({"stock_actual": nuevo_stock}).eq("id", ingrediente_id).execute()
+    
+    # Registrar movimiento
+    supabase.table("movimientos_inventario").insert({
+        "ingrediente_id": ingrediente_id,
+        "tipo": "compra",
+        "cantidad": cantidad,
+        "costo": costo,
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    
+    return {"message": "Compra registrada", "nuevo_stock": nuevo_stock}
+
+@app.post("/api/inventario/ajustar")
+def ajustar_stock(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    ingrediente_id = data.get("ingrediente_id")
+    nueva_cantidad = data.get("nueva_cantidad")
+    motivo = data.get("motivo", "Ajuste manual")
+    
+    if not ingrediente_id or nueva_cantidad is None:
+        raise HTTPException(status_code=400, detail="Faltan datos")
+    
+    # Obtener stock actual
+    ingrediente = supabase.table("ingredientes").select("stock_actual").eq("id", ingrediente_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not ingrediente.data:
+        raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+    
+    stock_actual = ingrediente.data[0]["stock_actual"]
+    diferencia = nueva_cantidad - stock_actual
+    tipo = "ajuste_positivo" if diferencia > 0 else "ajuste_negativo"
+    
+    # Actualizar stock
+    supabase.table("ingredientes").update({"stock_actual": nueva_cantidad}).eq("id", ingrediente_id).execute()
+    
+    # Registrar movimiento
+    supabase.table("movimientos_inventario").insert({
+        "ingrediente_id": ingrediente_id,
+        "tipo": tipo,
+        "cantidad": abs(diferencia),
+        "motivo": motivo,
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    
+    return {"message": "Stock ajustado", "nuevo_stock": nueva_cantidad}
+
+@app.get("/api/inventario/historial/{ingrediente_id}")
+def get_historial(ingrediente_id: int, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    movimientos = supabase.table("movimientos_inventario").select("*").eq("ingrediente_id", ingrediente_id).eq("empresa_id", current_user["empresa_id"]).order("fecha", desc=True).execute()
+    return movimientos.data
