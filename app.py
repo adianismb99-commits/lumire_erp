@@ -475,6 +475,7 @@ def get_empleados(current_user=Depends(get_current_user)):
 def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     
+    # Datos obligatorios
     nombre = empleado.get("nombre")
     email = empleado.get("email")
     tipo = empleado.get("tipo", "Empleado")
@@ -482,8 +483,11 @@ def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
     comision_porcentaje = empleado.get("comision_porcentaje", 0)
     fecha_ingreso = empleado.get("fecha_ingreso")
     crear_usuario = empleado.get("crear_usuario", True)
+    
+    # Obtener empresa_id del usuario autenticado
     empresa_id = current_user["empresa_id"]
     
+    # Insertar empleado
     nuevo_empleado = supabase.table("empleados").insert({
         "nombre": nombre,
         "email": email,
@@ -491,9 +495,9 @@ def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
         "salario_base": salario_base,
         "comision_porcentaje": comision_porcentaje,
         "fecha_ingreso": fecha_ingreso,
-        "empresa_id": empresa_id
+        "empresa_id": empresa_id  # <--- Asegurar que este campo existe
     }).execute()
-    
+        
     empleado_id = nuevo_empleado.data[0]["id"]
     resultado = {"empleado_id": empleado_id, "usuario_creado": False}
     
