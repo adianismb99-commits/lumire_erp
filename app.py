@@ -173,18 +173,18 @@ def get_usuarios(current_user=Depends(get_current_user)):
     
     return usuarios.data
 
-@app.get("/api/usuarios/{usuario_id}")
-def get_usuario(usuario_id: int, current_user=Depends(get_current_user)):
-    supabase = get_supabase()
-    usuario = supabase.table("usuarios").select("*").eq("id", usuario_id).eq("empresa_id", current_user["empresa_id"]).execute()
-    if not usuario.data:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    return usuario.data[0]
-
 @app.get("/api/usuarios/me")
 def get_me(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     usuario = supabase.table("usuarios").select("*").eq("id", current_user["id"]).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not usuario.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return usuario.data[0]
+
+@app.get("/api/usuarios/{usuario_id}")
+def get_usuario(usuario_id: int, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    usuario = supabase.table("usuarios").select("*").eq("id", usuario_id).eq("empresa_id", current_user["empresa_id"]).execute()
     if not usuario.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return usuario.data[0]
