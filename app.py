@@ -112,6 +112,7 @@ def login(usuario: dict, request: Request):
     email = usuario.get("email")
     password = usuario.get("password")
     empresa_id = usuario.get("empresa_id")
+    recordar_dispositivo = usuario.get("recordar_dispositivo", False)  # Nuevo campo
     
     ip = request.client.host
     user_agent = request.headers.get("user-agent", "Desconocido")
@@ -123,7 +124,6 @@ def login(usuario: dict, request: Request):
     user = authenticate_user(email, password)
     if not user:
         resultado = registrar_intento_fallido(email, ip, user_agent)
-        
         if resultado == "permanente":
             raise HTTPException(status_code=403, detail="⚠️ Cuenta bloqueada permanentemente. Contacta al administrador.")
         elif isinstance(resultado, int):
@@ -146,17 +146,37 @@ def login(usuario: dict, request: Request):
     # VERIFICAR 2FA PERSONALIZADO
     # ============================================
     if user.get("2fa_habilitado"):
+        # Verificar si el dispositivo es confiable
+        dispositivo_confirmado = user.get("dispositivo_confirmado", False)
+        fecha_dispositivo = user.get("fecha_dispositivo")
+        
+        # Si el usuario marcó "recordar dispositivo" y ya está confirmado
+        if recordar_dispositivo and dispositivo_confirmado:
+            # Verificar que no haya pasado más de 15 días
+            if fecha_dispositivo:
+                dias_pasados = (datetime.now(CUBA_TZ) - datetime.fromisoformat(fecha_dispositivo)).days
+                if dias_pasados < 15:
+                    # ✅ Dispositivo confiable: generar token sin 2FA
+                    access_token = create_access_token(data={
+                        "sub": str(user["id"]),
+                        "empresa_id": empresa_id,
+                        "role": user["rol_id"]
+                    })
+                    return {"access_token": access_token, "token_type": "bearer", "user": user}
+        
+        # ⚠️ Necesita 2FA
         temp_token_data = {
             "sub": str(user["id"]),
             "temporal": True,
-            "exp": (datetime.now(CUBA_TZ) + timedelta(minutes=5)).astimezone(pytz.UTC)
+            "exp": datetime.utcnow() + timedelta(minutes=5)
         }
         temp_token = jwt.encode(temp_token_data, SECRET_KEY, algorithm=ALGORITHM)
         
         return {
             "requires_2fa": True,
             "temporal_token": temp_token,
-            "message": "Se requiere verificación en dos pasos"
+            "message": "Se requiere verificación en dos pasos",
+            "recordar_dispositivo": True  # Para que el frontend muestre la opción
         }
     
     access_token = create_access_token(data={
@@ -780,6 +800,7 @@ def verify_2fa(data: dict):
     
     temporal_token = data.get("temporal_token")
     codigo = data.get("codigo")
+    recordar_dispositivo = data.get("recordar_dispositivo", False)  # Nuevo campo
     
     if not temporal_token or not codigo:
         raise HTTPException(status_code=400, detail="Faltan datos")
@@ -812,12 +833,22 @@ def verify_2fa(data: dict):
     
     # Comparar el código ingresado con el guardado
     if codigo != codigo_guardado:
+        # Manejar intentos fallidos...
         raise HTTPException(status_code=400, detail="Código de verificación incorrecto")
     
     # ✅ Código correcto: actualizar última verificación
-    supabase.table("usuarios").update({
-        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat()
-    }).eq("id", user_id).execute()
+    update_data = {
+        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat(),
+        "intentos_2fa": 0,
+        "bloqueado_2fa": False
+    }
+    
+    # Si el usuario marcó "recordar dispositivo", guardar
+    if recordar_dispositivo:
+        update_data["dispositivo_confirmado"] = True
+        update_data["fecha_dispositivo"] = datetime.now(CUBA_TZ).isoformat()
+    
+    supabase.table("usuarios").update(update_data).eq("id", user_id).execute()
     
     # Generar token final
     access_token = create_access_token(data={
