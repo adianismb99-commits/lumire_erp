@@ -157,7 +157,9 @@ def login(usuario: dict, request: Request):
         fecha_dispositivo = user.get("fecha_dispositivo")
         
         if dispositivo_confirmado and fecha_dispositivo:
-            dias_pasados = (datetime.now(CUBA_TZ) - datetime.fromisoformat(fecha_dispositivo)).days
+            # Convertir fecha_dispositivo a aware (con zona horaria de Cuba)
+            fecha_dispositivo_aware = datetime.fromisoformat(fecha_dispositivo).replace(tzinfo=CUBA_TZ)
+            dias_pasados = (datetime.now(CUBA_TZ) - fecha_dispositivo_aware).days
             if dias_pasados < 15:
                 # ✅ Dispositivo confiable: NO pedir 2FA
                 print(f"✅ Dispositivo confiable - No pedir 2FA")
