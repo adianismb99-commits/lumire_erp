@@ -152,39 +152,29 @@ def login(usuario: dict, request: Request):
     # VERIFICAR 2FA PERSONALIZADO
     # ============================================
     if user.get("2fa_habilitado"):
-        # Verificar si el dispositivo es confiable
+        # Verificar si el dispositivo es confiable (sin importar lo que envíe el frontend)
         dispositivo_confirmado = user.get("dispositivo_confirmado", False)
         fecha_dispositivo = user.get("fecha_dispositivo")
         
-        print(f"🔍 dispositivo_confirmado: {dispositivo_confirmado}")
-        print(f"🔍 fecha_dispositivo: {fecha_dispositivo}")
-        
-        # Si el usuario marcó "recordar dispositivo" y ya está confirmado
-        if recordar_dispositivo and dispositivo_confirmado and fecha_dispositivo:
+        if dispositivo_confirmado and fecha_dispositivo:
             dias_pasados = (datetime.now(CUBA_TZ) - datetime.fromisoformat(fecha_dispositivo)).days
-            print(f"🔍 dias_pasados: {dias_pasados}")
             if dias_pasados < 15:
-                # ✅ Dispositivo confiable: generar token sin 2FA
-                print(f"✅ DISPOSITIVO CONFIABLE - Generando token sin 2FA")
+                # ✅ Dispositivo confiable: NO pedir 2FA
+                print(f"✅ Dispositivo confiable - No pedir 2FA")
                 access_token = create_access_token(data={
                     "sub": str(user["id"]),
                     "empresa_id": empresa_id,
                     "role": user["rol_id"]
                 })
                 return {"access_token": access_token, "token_type": "bearer", "user": user}
-            else:
-                print(f"⚠️ Han pasado {dias_pasados} días, se requiere 2FA")
-        else:
-            print(f"⚠️ No se cumple condición - recordar_dispositivo: {recordar_dispositivo}, dispositivo_confirmado: {dispositivo_confirmado}, fecha_dispositivo: {fecha_dispositivo}")
         
-        # ⚠️ Necesita 2FA
+        # Si no es confiable, pedir 2FA
         temp_token_data = {
             "sub": str(user["id"]),
             "temporal": True,
             "exp": datetime.utcnow() + timedelta(minutes=5)
         }
         temp_token = jwt.encode(temp_token_data, SECRET_KEY, algorithm=ALGORITHM)
-        
         return {
             "requires_2fa": True,
             "temporal_token": temp_token,
