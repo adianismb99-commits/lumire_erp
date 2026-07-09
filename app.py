@@ -1,6 +1,10 @@
 import os
 import random
 import string
+import pyotp
+import qrcode
+import base64
+from io import BytesIO
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -82,6 +86,8 @@ def get_usuarios_public():
 
 @app.post("/api/login")
 def login(usuario: dict):
+    from auth import authenticate_user, create_access_token
+    
     email = usuario.get("email")
     password = usuario.get("password")
     empresa_id = usuario.get("empresa_id")
@@ -93,6 +99,23 @@ def login(usuario: dict):
     if user["empresa_id"] != empresa_id:
         raise HTTPException(status_code=401, detail="Usuario no pertenece a esta empresa")
     
+    # Verificar si tiene 2FA activado
+    if user.get("2fa_habilitado"):
+        # Generar token temporal (expira en 5 minutos)
+        temp_token_data = {
+            "sub": str(user["id"]),
+            "temporal": True,
+            "exp": datetime.utcnow() + timedelta(minutes=5)
+        }
+        temp_token = jwt.encode(temp_token_data, SECRET_KEY, algorithm=ALGORITHM)
+        
+        return {
+            "requires_2fa": True,
+            "temporal_token": temp_token,
+            "message": "Se requiere verificación en dos pasos"
+        }
+    
+    # Si no tiene 2FA, devolver token normal
     access_token = create_access_token(data={
         "sub": str(user["id"]),
         "empresa_id": empresa_id,
@@ -211,6 +234,15 @@ def cambiar_password(usuario_id: int, data: dict, current_user=Depends(get_curre
     supabase.table("usuarios").update({"password_hash": nueva_password}).eq("id", usuario_id).execute()
     
     return {"message": "Contraseña actualizada"}
+
+@app.get("/api/usuarios/me")
+def get_me(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    usuario = supabase.table("usuarios").select("*").eq("id", current_user["id"]).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not usuario.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return usuario.data[0]
 
 # ============================================
 # ENDPOINTS PARA RECUPERACIÓN DE CONTRASEÑA
@@ -663,59 +695,60 @@ def get_nomina_historial(mes: str, current_user=Depends(get_current_user)):
     return []
 
 # ============================================
-# ENDPOINTS PARA 2FA
+# ENDPOINTS PARA 2FA (Google Authenticator)
 # ============================================
 
 @app.post("/api/auth/enable-2fa")
-def enable_2fa(metodo: str, current_user=Depends(get_current_user)):
+def enable_2fa(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     
-    codigo = str(random.randint(100000, 999999))
-    expira = datetime.utcnow() + timedelta(minutes=5)
+    # Generar clave secreta si no existe
+    secret = current_user.get("secret_2fa")
+    if not secret:
+        secret = pyotp.random_base32()
+        supabase.table("usuarios").update({
+            "secret_2fa": secret
+        }).eq("id", current_user["id"]).execute()
     
-    supabase.table("codigos_otp").insert({
-        "usuario_id": current_user["id"],
-        "codigo": codigo,
-        "metodo": metodo,
-        "expira_en": expira.isoformat(),
-        "usado": False
-    }).execute()
+    # Generar URL para el QR
+    totp = pyotp.TOTP(secret)
+    nombre_usuario = current_user.get("email", "usuario@lumire.com")
+    qr_url = totp.provisioning_uri(nombre_usuario, issuer_name="LUMIRE ERP")
     
-    if metodo == "email":
-        enviar_correo(current_user["email"], "Código de verificación LUMIRE ERP", f"Tu código de verificación es: <b>{codigo}</b>")
-    elif metodo == "sms":
-        telefono = current_user.get("telefono")
-        if not telefono:
-            raise HTTPException(status_code=400, detail="No tienes un número de teléfono registrado")
-        enviar_sms(telefono, f"Tu código de verificación LUMIRE ERP es: {codigo}")
-    else:
-        raise HTTPException(status_code=400, detail="Método no válido")
+    # Generar código QR en base64 (para mostrar en el frontend)
+    qr = qrcode.make(qr_url)
+    buffer = BytesIO()
+    qr.save(buffer, format="PNG")
+    qr_base64 = base64.b64encode(buffer.getvalue()).decode()
     
-    return {"message": f"Código enviado por {metodo}"}
+    return {
+        "secret": secret,
+        "qr_base64": qr_base64,
+        "qr_url": qr_url
+    }
 
 @app.post("/api/auth/confirm-2fa")
-def confirm_2fa(codigo: str, current_user=Depends(get_current_user)):
+def confirm_2fa(data: dict, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     
-    now = datetime.utcnow().isoformat()
-    record = supabase.table("codigos_otp")\
-        .select("*")\
-        .eq("usuario_id", current_user["id"])\
-        .eq("codigo", codigo)\
-        .eq("usado", False)\
-        .gte("expira_en", now)\
-        .execute()
+    codigo = data.get("codigo")
+    if not codigo:
+        raise HTTPException(status_code=400, detail="Código requerido")
     
-    if not record.data:
-        raise HTTPException(status_code=400, detail="Código inválido o expirado")
+    secret = current_user.get("secret_2fa")
+    if not secret:
+        raise HTTPException(status_code=400, detail="No hay clave secreta configurada")
     
+    # Verificar el código
+    totp = pyotp.TOTP(secret)
+    if not totp.verify(codigo):
+        raise HTTPException(status_code=400, detail="Código inválido")
+    
+    # Activar 2FA
     supabase.table("usuarios").update({
         "2fa_habilitado": True,
-        "2fa_metodo": record.data[0]["metodo"],
         "ultima_verificacion_2fa": datetime.utcnow().isoformat()
     }).eq("id", current_user["id"]).execute()
-    
-    supabase.table("codigos_otp").update({"usado": True}).eq("id", record.data[0]["id"]).execute()
     
     return {"message": "2FA activado correctamente"}
 
@@ -725,15 +758,24 @@ def disable_2fa(current_user=Depends(get_current_user)):
     
     supabase.table("usuarios").update({
         "2fa_habilitado": False,
-        "2fa_metodo": None
+        "secret_2fa": None,
+        "ultima_verificacion_2fa": None
     }).eq("id", current_user["id"]).execute()
     
     return {"message": "2FA desactivado"}
 
 @app.post("/api/auth/verify-2fa")
-def verify_2fa(temporal_token: str, codigo: str):
+def verify_2fa(data: dict):
     supabase = get_supabase()
+    from auth import create_access_token
     
+    temporal_token = data.get("temporal_token")
+    codigo = data.get("codigo")
+    
+    if not temporal_token or not codigo:
+        raise HTTPException(status_code=400, detail="Faltan datos")
+    
+    # Validar el temporal_token (contiene user_id)
     try:
         payload = jwt.decode(temporal_token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
@@ -744,29 +786,32 @@ def verify_2fa(temporal_token: str, codigo: str):
     except jwt.JWTError:
         raise HTTPException(status_code=400, detail="Token inválido")
     
-    now = datetime.utcnow().isoformat()
-    record = supabase.table("codigos_otp")\
-        .select("*")\
-        .eq("usuario_id", user_id)\
-        .eq("codigo", codigo)\
-        .eq("usado", False)\
-        .gte("expira_en", now)\
-        .execute()
+    # Obtener usuario
+    user = supabase.table("usuarios").select("*").eq("id", user_id).execute()
+    if not user.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
-    if not record.data:
-        raise HTTPException(status_code=400, detail="Código inválido o expirado")
+    user_data = user.data[0]
     
-    supabase.table("codigos_otp").update({"usado": True}).eq("id", record.data[0]["id"]).execute()
+    # Verificar el código
+    secret = user_data.get("secret_2fa")
+    if not secret:
+        raise HTTPException(status_code=400, detail="2FA no configurado para este usuario")
+    
+    totp = pyotp.TOTP(secret)
+    if not totp.verify(codigo):
+        raise HTTPException(status_code=400, detail="Código inválido")
+    
+    # Actualizar última verificación
     supabase.table("usuarios").update({
         "ultima_verificacion_2fa": datetime.utcnow().isoformat()
     }).eq("id", user_id).execute()
     
-    user = supabase.table("usuarios").select("*").eq("id", user_id).execute().data[0]
-    
+    # Generar token final
     access_token = create_access_token(data={
-        "sub": str(user["id"]),
-        "empresa_id": user["empresa_id"],
-        "role": user["rol_id"]
+        "sub": str(user_data["id"]),
+        "empresa_id": user_data["empresa_id"],
+        "role": user_data["rol_id"]
     })
     
-    return {"access_token": access_token, "token_type": "bearer", "user": user}
+    return {"access_token": access_token, "token_type": "bearer", "user": user_data}
