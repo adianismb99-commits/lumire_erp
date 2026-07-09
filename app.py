@@ -891,3 +891,41 @@ def desbloquear_usuario(data: dict, current_user=Depends(get_current_user)):
     supabase.table("intentos_fallidos").delete().eq("email", email).execute()
     
     return {"message": f"Usuario {email} desbloqueado"}
+@app.post("/api/auth/cambiar-2fa")
+def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    from auth import verify_password
+    
+    password = data.get("password")
+    nueva_clave = data.get("nueva_clave")
+    nuevo_codigo = data.get("nuevo_codigo")
+    
+    if not password or not nueva_clave or not nuevo_codigo:
+        raise HTTPException(status_code=400, detail="Todos los campos son requeridos")
+    
+    # Verificar contraseña actual
+    user = supabase.table("usuarios").select("*").eq("id", current_user["id"]).execute()
+    if not user.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    user_data = user.data[0]
+    if not verify_password(password, user_data["password_hash"]):
+        raise HTTPException(status_code=400, detail="Contraseña incorrecta")
+    
+    # Validar nueva clave y código
+    if len(nueva_clave) < 8:
+        raise HTTPException(status_code=400, detail="La clave secreta debe tener al menos 8 caracteres")
+    
+    if len(nuevo_codigo) != 6 or not nuevo_codigo.isdigit():
+        raise HTTPException(status_code=400, detail="El código de verificación debe ser 6 dígitos")
+    
+    # Actualizar 2FA
+    supabase.table("usuarios").update({
+        "secret_2fa": nueva_clave,
+        "codigo_2fa_personal": nuevo_codigo,
+        "ultima_verificacion_2fa": datetime.utcnow().isoformat(),
+        "intentos_2fa": 0,
+        "bloqueado_2fa": False
+    }).eq("id", current_user["id"]).execute()
+    
+    return {"message": "2FA actualizado correctamente"}
