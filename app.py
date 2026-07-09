@@ -112,7 +112,7 @@ def login(usuario: dict, request: Request):
     email = usuario.get("email")
     password = usuario.get("password")
     empresa_id = usuario.get("empresa_id")
-    recordar_dispositivo = usuario.get("recordar_dispositivo", False)  # Nuevo campo
+    recordar_dispositivo = usuario.get("recordar_dispositivo", False) 
     
     ip = request.client.host
     user_agent = request.headers.get("user-agent", "Desconocido")
@@ -151,18 +151,16 @@ def login(usuario: dict, request: Request):
         fecha_dispositivo = user.get("fecha_dispositivo")
         
         # Si el usuario marcó "recordar dispositivo" y ya está confirmado
-        if recordar_dispositivo and dispositivo_confirmado:
-            # Verificar que no haya pasado más de 15 días
-            if fecha_dispositivo:
-                dias_pasados = (datetime.now(CUBA_TZ) - datetime.fromisoformat(fecha_dispositivo)).days
-                if dias_pasados < 15:
-                    # ✅ Dispositivo confiable: generar token sin 2FA
-                    access_token = create_access_token(data={
-                        "sub": str(user["id"]),
-                        "empresa_id": empresa_id,
-                        "role": user["rol_id"]
-                    })
-                    return {"access_token": access_token, "token_type": "bearer", "user": user}
+        if recordar_dispositivo and dispositivo_confirmado and fecha_dispositivo:
+            dias_pasados = (datetime.now(CUBA_TZ) - datetime.fromisoformat(fecha_dispositivo)).days
+            if dias_pasados < 15:
+                # ✅ Dispositivo confiable: generar token sin 2FA
+                access_token = create_access_token(data={
+                    "sub": str(user["id"]),
+                    "empresa_id": empresa_id,
+                    "role": user["rol_id"]
+                })
+                return {"access_token": access_token, "token_type": "bearer", "user": user}
         
         # ⚠️ Necesita 2FA
         temp_token_data = {
@@ -175,8 +173,7 @@ def login(usuario: dict, request: Request):
         return {
             "requires_2fa": True,
             "temporal_token": temp_token,
-            "message": "Se requiere verificación en dos pasos",
-            "recordar_dispositivo": True  # Para que el frontend muestre la opción
+            "message": "Se requiere verificación en dos pasos"
         }
     
     access_token = create_access_token(data={
