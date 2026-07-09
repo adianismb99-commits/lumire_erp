@@ -1,10 +1,6 @@
 import os
 import random
 import string
-import pyotp
-import qrcode
-import base64
-from io import BytesIO
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,19 +96,15 @@ def login(usuario: dict, request: Request):
     password = usuario.get("password")
     empresa_id = usuario.get("empresa_id")
     
-    # Obtener IP y user_agent para auditoría
     ip = request.client.host
     user_agent = request.headers.get("user-agent", "Desconocido")
     
-    # 1. Verificar bloqueos
     bloqueo = verificar_bloqueo(email)
     if bloqueo["bloqueado"]:
         raise HTTPException(status_code=403, detail=bloqueo["motivo"])
     
-    # 2. Autenticar
     user = authenticate_user(email, password)
     if not user:
-        # Registrar intento fallido
         resultado = registrar_intento_fallido(email, ip, user_agent)
         
         if resultado == "permanente":
@@ -128,16 +120,15 @@ def login(usuario: dict, request: Request):
         else:
             raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     
-    # 3. Si la autenticación es exitosa, limpiar los intentos fallidos
     limpiar_intentos(email)
     
-    # 4. Verificar si el usuario pertenece a la empresa
     if user["empresa_id"] != empresa_id:
         raise HTTPException(status_code=401, detail="Usuario no pertenece a esta empresa")
     
-    # 5. Verificar si tiene 2FA activado
+    # ============================================
+    # VERIFICAR 2FA PERSONALIZADO
+    # ============================================
     if user.get("2fa_habilitado"):
-        # Generar token temporal (expira en 5 minutos)
         temp_token_data = {
             "sub": str(user["id"]),
             "temporal": True,
@@ -151,7 +142,6 @@ def login(usuario: dict, request: Request):
             "message": "Se requiere verificación en dos pasos"
         }
     
-    # 6. Si no tiene 2FA, devolver token normal
     access_token = create_access_token(data={
         "sub": str(user["id"]),
         "empresa_id": empresa_id,
@@ -724,53 +714,26 @@ def get_nomina_historial(mes: str, current_user=Depends(get_current_user)):
     return []
 
 # ============================================
-# ENDPOINTS PARA 2FA (Google Authenticator)
+# ENDPOINTS PARA 2FA PERSONALIZADO
 # ============================================
 
-@app.post("/api/auth/enable-2fa")
-def enable_2fa(current_user=Depends(get_current_user)):
+@app.post("/api/auth/enable-2fa-personal")
+def enable_2fa_personal(data: dict, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     
-    secret = current_user.get("secret_2fa")
-    if not secret:
-        secret = pyotp.random_base32()
-        supabase.table("usuarios").update({
-            "secret_2fa": secret
-        }).eq("id", current_user["id"]).execute()
+    clave_secreta = data.get("clave_secreta")
+    codigo_verificacion = data.get("codigo_verificacion")
     
-    totp = pyotp.TOTP(secret)
-    nombre_usuario = current_user.get("email", "usuario@lumire.com")
-    qr_url = totp.provisioning_uri(nombre_usuario, issuer_name="LUMIRE ERP")
+    if not clave_secreta or len(clave_secreta) < 8:
+        raise HTTPException(status_code=400, detail="La clave secreta debe tener al menos 8 caracteres")
     
-    qr = qrcode.make(qr_url)
-    buffer = BytesIO()
-    qr.save(buffer, format="PNG")
-    qr_base64 = base64.b64encode(buffer.getvalue()).decode()
-    
-    return {
-        "secret": secret,
-        "qr_base64": qr_base64,
-        "qr_url": qr_url
-    }
-
-@app.post("/api/auth/confirm-2fa")
-def confirm_2fa(data: dict, current_user=Depends(get_current_user)):
-    supabase = get_supabase()
-    
-    codigo = data.get("codigo")
-    if not codigo:
-        raise HTTPException(status_code=400, detail="Código requerido")
-    
-    secret = current_user.get("secret_2fa")
-    if not secret:
-        raise HTTPException(status_code=400, detail="No hay clave secreta configurada")
-    
-    totp = pyotp.TOTP(secret)
-    if not totp.verify(codigo):
-        raise HTTPException(status_code=400, detail="Código inválido")
+    if not codigo_verificacion or len(codigo_verificacion) != 6 or not codigo_verificacion.isdigit():
+        raise HTTPException(status_code=400, detail="El código de verificación debe ser 6 dígitos")
     
     supabase.table("usuarios").update({
+        "secret_2fa": clave_secreta,
         "2fa_habilitado": True,
+        "codigo_2fa_personal": codigo_verificacion,
         "ultima_verificacion_2fa": datetime.utcnow().isoformat()
     }).eq("id", current_user["id"]).execute()
     
@@ -783,10 +746,15 @@ def disable_2fa(current_user=Depends(get_current_user)):
     supabase.table("usuarios").update({
         "2fa_habilitado": False,
         "secret_2fa": None,
+        "codigo_2fa_personal": None,
         "ultima_verificacion_2fa": None
     }).eq("id", current_user["id"]).execute()
     
     return {"message": "2FA desactivado"}
+
+# ============================================
+# VERIFICAR 2FA PERSONALIZADO (para el login)
+# ============================================
 
 @app.post("/api/auth/verify-2fa")
 def verify_2fa(data: dict):
@@ -799,6 +767,7 @@ def verify_2fa(data: dict):
     if not temporal_token or not codigo:
         raise HTTPException(status_code=400, detail="Faltan datos")
     
+    # Validar el temporal_token
     try:
         payload = jwt.decode(temporal_token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
@@ -809,24 +778,31 @@ def verify_2fa(data: dict):
     except jwt.JWTError:
         raise HTTPException(status_code=400, detail="Token inválido")
     
+    # Obtener usuario
     user = supabase.table("usuarios").select("*").eq("id", user_id).execute()
     if not user.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
     user_data = user.data[0]
     
-    secret = user_data.get("secret_2fa")
-    if not secret:
-        raise HTTPException(status_code=400, detail="2FA no configurado para este usuario")
+    # Verificar 2FA personalizado
+    if not user_data.get("2fa_habilitado"):
+        raise HTTPException(status_code=400, detail="2FA no está activado para este usuario")
     
-    totp = pyotp.TOTP(secret)
-    if not totp.verify(codigo):
-        raise HTTPException(status_code=400, detail="Código inválido")
+    codigo_guardado = user_data.get("codigo_2fa_personal")
+    if not codigo_guardado:
+        raise HTTPException(status_code=400, detail="No hay código de verificación configurado")
     
+    # Comparar el código ingresado con el guardado
+    if codigo != codigo_guardado:
+        raise HTTPException(status_code=400, detail="Código de verificación incorrecto")
+    
+    # ✅ Código correcto: actualizar última verificación
     supabase.table("usuarios").update({
         "ultima_verificacion_2fa": datetime.utcnow().isoformat()
     }).eq("id", user_id).execute()
     
+    # Generar token final
     access_token = create_access_token(data={
         "sub": str(user_data["id"]),
         "empresa_id": user_data["empresa_id"],
