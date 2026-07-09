@@ -980,7 +980,7 @@ def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
     return {"message": "2FA actualizado correctamente"}
 
 # ============================================
-# ENDPOINTS PARA CIERRE DE CAJA
+# ENDPOINTS PARA CAJA REGISTRADORA COMPLETA
 # ============================================
 
 @app.get("/api/caja/estado")
@@ -992,62 +992,113 @@ def get_caja_estado(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     CUBA_TZ = pytz.timezone('America/Havana')
     
-    # Buscar sesión abierta (sin empresa_id por ahora)
+    # Buscar sesión abierta
     sesion = supabase.table("sesiones_caja")\
-        .select("*")\
+        .select("*, cajas(nombre)")\
+        .eq("empresa_id", current_user["empresa_id"])\
         .eq("estado", "abierta")\
         .order("fecha_apertura", desc=True)\
         .limit(1)\
         .execute()
     
     if not sesion.data:
-        return {"estado": "cerrada", "sesion": None, "ventas_hoy": 0, "gastos_hoy": 0, "saldo_esperado": 0, "saldo_real": 0, "gastos": []}
+        return {"estado": "cerrada"}
     
     sesion_data = sesion.data[0]
     sesion_id = sesion_data["id"]
+    caja_nombre = sesion_data.get("cajas", {}).get("nombre", "Caja Principal") if sesion_data.get("cajas") else "Caja Principal"
     
-    # Obtener ventas del día
+    # Obtener movimientos del día
     hoy = datetime.now(CUBA_TZ).date().isoformat()
-    ventas = supabase.table("ventas")\
-        .select("total")\
-        .gte("fecha", hoy)\
+    movimientos = supabase.table("movimientos_caja")\
+        .select("*")\
+        .eq("sesion_caja_id", sesion_id)\
+        .order("fecha", desc=True)\
         .execute()
     
-    total_ventas = sum(v["total"] for v in ventas.data) if ventas.data else 0
+    ventas_hoy = 0
+    gastos_hoy = 0
+    ingresos_extra = 0
     
-    # Obtener gastos de la sesión
-    gastos = supabase.table("gastos_caja")\
+    for m in movimientos.data:
+        if m["tipo"] == "venta":
+            ventas_hoy += m["monto"]
+        elif m["tipo"] == "gasto":
+            gastos_hoy += m["monto"]
+        elif m["tipo"] == "ingreso_extra":
+            ingresos_extra += m["monto"]
+    
+    saldo_esperado = sesion_data["saldo_inicial"] + ventas_hoy - gastos_hoy + ingresos_extra
+    
+    # Obtener notificaciones
+    notificaciones = supabase.table("notificaciones_caja")\
+        .select("*")\
+        .eq("sesion_caja_id", sesion_id)\
+        .eq("leida", False)\
+        .order("fecha", desc=True)\
+        .limit(10)\
+        .execute()
+    
+    # Obtener arqueo
+    arqueo = supabase.table("arqueo_caja")\
         .select("*")\
         .eq("sesion_caja_id", sesion_id)\
         .execute()
     
-    total_gastos = sum(g["monto"] for g in gastos.data) if gastos.data else 0
-    
-    # Saldo esperado
-    saldo_inicial = sesion_data.get("saldo_inicial", 0)
-    saldo_esperado = saldo_inicial + total_ventas - total_gastos
-    
     return {
         "estado": "abierta",
-        "sesion": sesion_data,
-        "ventas_hoy": total_ventas,
-        "gastos_hoy": total_gastos,
+        "sesion": {**sesion_data, "caja_nombre": caja_nombre},
+        "ventas_hoy": ventas_hoy,
+        "gastos_hoy": gastos_hoy,
+        "ingresos_extra": ingresos_extra,
         "saldo_esperado": saldo_esperado,
         "saldo_real": sesion_data.get("saldo_real", 0),
-        "gastos": gastos.data if gastos.data else []
+        "movimientos": movimientos.data,
+        "notificaciones": notificaciones.data,
+        "arqueo": arqueo.data
     }
 
 @app.post("/api/caja/abrir")
 def abrir_caja(data: dict, current_user=Depends(get_current_user)):
-    supabase = get_supabase()
+    from database import get_supabase
+    from datetime import datetime
+    import pytz
     
+    supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
+    
+    nombre = data.get("nombre", "Caja Principal")
     saldo_inicial = data.get("saldo_inicial", 0)
     observaciones = data.get("observaciones", "")
     
+    # Crear o obtener caja
+    caja = supabase.table("cajas")\
+        .select("id")\
+        .eq("nombre", nombre)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
+    if not caja.data:
+        caja = supabase.table("cajas").insert({
+            "nombre": nombre,
+            "saldo_inicial": saldo_inicial,
+            "estado": "abierta",
+            "empresa_id": current_user["empresa_id"]
+        }).execute()
+        caja_id = caja.data[0]["id"]
+    else:
+        caja_id = caja.data[0]["id"]
+        supabase.table("cajas").update({
+            "saldo_inicial": saldo_inicial,
+            "estado": "abierta"
+        }).eq("id", caja_id).execute()
+    
+    # Crear sesión
     nueva = supabase.table("sesiones_caja").insert({
-        "caja_id": 1,
+        "caja_id": caja_id,
         "usuario_id": current_user["id"],
         "saldo_inicial": saldo_inicial,
+        "observaciones": observaciones,
         "estado": "abierta",
         "empresa_id": current_user["empresa_id"]
     }).execute()
@@ -1056,7 +1107,12 @@ def abrir_caja(data: dict, current_user=Depends(get_current_user)):
 
 @app.post("/api/caja/cerrar")
 def cerrar_caja(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    from datetime import datetime
+    import pytz
+    
     supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
     
     saldo_real = data.get("saldo_real")
     observaciones = data.get("observaciones", "")
@@ -1076,23 +1132,17 @@ def cerrar_caja(data: dict, current_user=Depends(get_current_user)):
     sesion_id = sesion.data[0]["id"]
     saldo_inicial = sesion.data[0]["saldo_inicial"]
     
-    # Calcular ventas del día
-    hoy = datetime.now(CUBA_TZ).date().isoformat()
-    ventas = supabase.table("ventas")\
-        .select("total")\
-        .eq("empresa_id", current_user["empresa_id"])\
-        .gte("fecha", hoy)\
-        .execute()
-    total_ventas = sum(v["total"] for v in ventas.data)
-    
-    # Calcular gastos
-    gastos = supabase.table("gastos_caja")\
-        .select("monto")\
+    # Calcular movimientos
+    movimientos = supabase.table("movimientos_caja")\
+        .select("*")\
         .eq("sesion_caja_id", sesion_id)\
         .execute()
-    total_gastos = sum(g["monto"] for g in gastos.data) if gastos.data else 0
     
-    saldo_esperado = saldo_inicial + total_ventas - total_gastos
+    ventas = sum(m["monto"] for m in movimientos.data if m["tipo"] == "venta")
+    gastos = sum(m["monto"] for m in movimientos.data if m["tipo"] == "gasto")
+    ingresos_extra = sum(m["monto"] for m in movimientos.data if m["tipo"] == "ingreso_extra")
+    
+    saldo_esperado = saldo_inicial + ventas - gastos + ingresos_extra
     diferencia = saldo_real - saldo_esperado
     
     # Cerrar sesión
@@ -1101,9 +1151,26 @@ def cerrar_caja(data: dict, current_user=Depends(get_current_user)):
         "saldo_esperado": saldo_esperado,
         "saldo_real": saldo_real,
         "diferencia": diferencia,
-        "estado": "cerrada",
-        "observaciones": observaciones
+        "observaciones": observaciones,
+        "estado": "cerrada"
     }).eq("id", sesion_id).execute()
+    
+    # Cerrar caja
+    supabase.table("cajas").update({
+        "estado": "cerrada",
+        "saldo_actual": saldo_real
+    }).eq("id", sesion.data[0]["caja_id"]).execute()
+    
+    # Crear notificación si hay diferencia
+    if abs(diferencia) > 0.01:
+        mensaje = f"Diferencia de {abs(diferencia):.2f} en el cierre de caja"
+        tipo = "warning" if abs(diferencia) < 100 else "error"
+        supabase.table("notificaciones_caja").insert({
+            "sesion_caja_id": sesion_id,
+            "mensaje": mensaje,
+            "tipo": tipo,
+            "empresa_id": current_user["empresa_id"]
+        }).execute()
     
     return {
         "message": "Caja cerrada",
@@ -1114,7 +1181,12 @@ def cerrar_caja(data: dict, current_user=Depends(get_current_user)):
 
 @app.post("/api/caja/gasto")
 def agregar_gasto(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    from datetime import datetime
+    import pytz
+    
     supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
     
     # Buscar sesión abierta
     sesion = supabase.table("sesiones_caja")\
@@ -1127,18 +1199,93 @@ def agregar_gasto(data: dict, current_user=Depends(get_current_user)):
     if not sesion.data:
         raise HTTPException(status_code=404, detail="No hay caja abierta")
     
-    nuevo = supabase.table("gastos_caja").insert({
-        "sesion_caja_id": sesion.data[0]["id"],
+    sesion_id = sesion.data[0]["id"]
+    
+    nuevo = supabase.table("movimientos_caja").insert({
+        "sesion_caja_id": sesion_id,
+        "tipo": "gasto",
         "concepto": data.get("concepto"),
         "monto": data.get("monto"),
         "categoria": data.get("categoria", "otros"),
+        "comprobante": data.get("comprobante", ""),
         "empresa_id": current_user["empresa_id"]
     }).execute()
     
     return {"message": "Gasto registrado", "id": nuevo.data[0]["id"]}
 
+@app.post("/api/caja/ingreso-extra")
+def agregar_ingreso_extra(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    from datetime import datetime
+    import pytz
+    
+    supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        raise HTTPException(status_code=404, detail="No hay caja abierta")
+    
+    sesion_id = sesion.data[0]["id"]
+    
+    nuevo = supabase.table("movimientos_caja").insert({
+        "sesion_caja_id": sesion_id,
+        "tipo": "ingreso_extra",
+        "concepto": data.get("concepto"),
+        "monto": data.get("monto"),
+        "comprobante": data.get("comprobante", ""),
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    
+    return {"message": "Ingreso extra registrado", "id": nuevo.data[0]["id"]}
+
+@app.post("/api/caja/arqueo")
+def guardar_arqueo(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    from datetime import datetime
+    import pytz
+    
+    supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        raise HTTPException(status_code=404, detail="No hay caja abierta")
+    
+    sesion_id = sesion.data[0]["id"]
+    
+    # Eliminar arqueo anterior
+    supabase.table("arqueo_caja").delete().eq("sesion_caja_id", sesion_id).execute()
+    
+    # Guardar nuevo arqueo
+    for item in data.get("arqueo", []):
+        supabase.table("arqueo_caja").insert({
+            "sesion_caja_id": sesion_id,
+            "denominacion": item.get("denominacion"),
+            "cantidad": item.get("cantidad"),
+            "total": item.get("denominacion") * item.get("cantidad"),
+            "tipo": item.get("tipo", "billete")
+        }).execute()
+    
+    return {"message": "Arqueo guardado"}
+
 @app.get("/api/caja/historial")
 def get_historial_caja(current_user=Depends(get_current_user)):
+    from database import get_supabase
     supabase = get_supabase()
     
     historial = supabase.table("sesiones_caja")\
@@ -1149,11 +1296,27 @@ def get_historial_caja(current_user=Depends(get_current_user)):
         .limit(30)\
         .execute()
     
+    # Enriquecer con totales de movimientos
+    for item in historial.data:
+        movimientos = supabase.table("movimientos_caja")\
+            .select("tipo, monto")\
+            .eq("sesion_caja_id", item["id"])\
+            .execute()
+        
+        item["total_ventas"] = sum(m["monto"] for m in movimientos.data if m["tipo"] == "venta")
+        item["total_gastos"] = sum(m["monto"] for m in movimientos.data if m["tipo"] == "gasto")
+        item["total_ingresos_extra"] = sum(m["monto"] for m in movimientos.data if m["tipo"] == "ingreso_extra")
+    
     return historial.data
 
 @app.get("/api/caja/resumen")
 def get_resumen_cierre(current_user=Depends(get_current_user)):
+    from database import get_supabase
+    from datetime import datetime
+    import pytz
+    
     supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
     
     # Buscar sesión abierta
     sesion = supabase.table("sesiones_caja")\
@@ -1169,31 +1332,26 @@ def get_resumen_cierre(current_user=Depends(get_current_user)):
     sesion_id = sesion.data[0]["id"]
     saldo_inicial = sesion.data[0]["saldo_inicial"]
     
-    # Ventas del día
-    hoy = datetime.now(CUBA_TZ).date().isoformat()
-    ventas = supabase.table("ventas")\
-        .select("total")\
-        .eq("empresa_id", current_user["empresa_id"])\
-        .gte("fecha", hoy)\
-        .execute()
-    total_ventas = sum(v["total"] for v in ventas.data)
-    
-    # Gastos
-    gastos = supabase.table("gastos_caja")\
-        .select("monto")\
+    movimientos = supabase.table("movimientos_caja")\
+        .select("*")\
         .eq("sesion_caja_id", sesion_id)\
         .execute()
-    total_gastos = sum(g["monto"] for g in gastos.data) if gastos.data else 0
+    
+    ventas = sum(m["monto"] for m in movimientos.data if m["tipo"] == "venta")
+    gastos = sum(m["monto"] for m in movimientos.data if m["tipo"] == "gasto")
+    ingresos_extra = sum(m["monto"] for m in movimientos.data if m["tipo"] == "ingreso_extra")
     
     return {
         "saldo_inicial": saldo_inicial,
-        "ventas": total_ventas,
-        "gastos": total_gastos,
-        "saldo_esperado": saldo_inicial + total_ventas - total_gastos
+        "ventas": ventas,
+        "gastos": gastos,
+        "ingresos_extra": ingresos_extra,
+        "saldo_esperado": saldo_inicial + ventas - gastos + ingresos_extra
     }
 
-@app.post("/api/caja/ingreso-extra")
-def agregar_ingreso_extra(data: dict, current_user=Depends(get_current_user)):
+@app.get("/api/caja/exportar")
+def exportar_caja(current_user=Depends(get_current_user)):
+    from database import get_supabase
     supabase = get_supabase()
     
     # Buscar sesión abierta
@@ -1205,15 +1363,42 @@ def agregar_ingreso_extra(data: dict, current_user=Depends(get_current_user)):
         .execute()
     
     if not sesion.data:
-        raise HTTPException(status_code=404, detail="No hay caja abierta")
+        return {"movimientos": []}
     
-    # Registrar como ingreso extra (gasto negativo)
-    nuevo = supabase.table("gastos_caja").insert({
-        "sesion_caja_id": sesion.data[0]["id"],
-        "concepto": data.get("concepto"),
-        "monto": -data.get("monto"),  # Negativo para indicar ingreso extra
-        "categoria": "ingreso_extra",
+    movimientos = supabase.table("movimientos_caja")\
+        .select("*")\
+        .eq("sesion_caja_id", sesion.data[0]["id"])\
+        .order("fecha", desc=True)\
+        .execute()
+    
+    return {"movimientos": movimientos.data}
+
+@app.post("/api/caja/movimiento-venta")
+def agregar_movimiento_venta(data: dict, current_user=Depends(get_current_user)):
+    from database import get_supabase
+    supabase = get_supabase()
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        # Si no hay caja abierta, no se registra movimiento (pero la venta ya está registrada)
+        return {"message": "No hay caja abierta, movimiento no registrado"}
+    
+    sesion_id = sesion.data[0]["id"]
+    
+    supabase.table("movimientos_caja").insert({
+        "sesion_caja_id": sesion_id,
+        "tipo": "venta",
+        "concepto": data.get("concepto", "Venta"),
+        "monto": data.get("total"),
+        "venta_id": data.get("venta_id"),
         "empresa_id": current_user["empresa_id"]
     }).execute()
     
-    return {"message": "Ingreso extra registrado", "id": nuevo.data[0]["id"]}
+    return {"message": "Movimiento registrado"}
