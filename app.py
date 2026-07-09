@@ -114,6 +114,12 @@ def login(usuario: dict, request: Request):
     empresa_id = usuario.get("empresa_id")
     recordar_dispositivo = usuario.get("recordar_dispositivo", False) 
     
+    # ============================================
+    # LOG PARA DEPURAR
+    # ============================================
+    print(f"🔍 LOGIN - recordar_dispositivo: {recordar_dispositivo}")
+    print(f"🔍 LOGIN - email: {email}")
+    
     ip = request.client.host
     user_agent = request.headers.get("user-agent", "Desconocido")
     
@@ -150,17 +156,26 @@ def login(usuario: dict, request: Request):
         dispositivo_confirmado = user.get("dispositivo_confirmado", False)
         fecha_dispositivo = user.get("fecha_dispositivo")
         
+        print(f"🔍 dispositivo_confirmado: {dispositivo_confirmado}")
+        print(f"🔍 fecha_dispositivo: {fecha_dispositivo}")
+        
         # Si el usuario marcó "recordar dispositivo" y ya está confirmado
         if recordar_dispositivo and dispositivo_confirmado and fecha_dispositivo:
             dias_pasados = (datetime.now(CUBA_TZ) - datetime.fromisoformat(fecha_dispositivo)).days
+            print(f"🔍 dias_pasados: {dias_pasados}")
             if dias_pasados < 15:
                 # ✅ Dispositivo confiable: generar token sin 2FA
+                print(f"✅ DISPOSITIVO CONFIABLE - Generando token sin 2FA")
                 access_token = create_access_token(data={
                     "sub": str(user["id"]),
                     "empresa_id": empresa_id,
                     "role": user["rol_id"]
                 })
                 return {"access_token": access_token, "token_type": "bearer", "user": user}
+            else:
+                print(f"⚠️ Han pasado {dias_pasados} días, se requiere 2FA")
+        else:
+            print(f"⚠️ No se cumple condición - recordar_dispositivo: {recordar_dispositivo}, dispositivo_confirmado: {dispositivo_confirmado}, fecha_dispositivo: {fecha_dispositivo}")
         
         # ⚠️ Necesita 2FA
         temp_token_data = {
@@ -332,7 +347,7 @@ def forgot_password(request: dict):
     supabase.table("tokens_recuperacion").insert({
         "usuario_id": user_id,
         "token": token,
-        "expira_en": (datetime.utcnow() + timedelta(minutes=RECOVERY_EXPIRE_MINUTES)).isoformat()
+        "expira_en": (datetime.now(CUBA_TZ) + timedelta(minutes=RECOVERY_EXPIRE_MINUTES)).isoformat()
     }).execute()
     
     frontend_url = os.getenv("FRONTEND_URL", "https://lumire-erp-frontend.onrender.com")
@@ -797,7 +812,12 @@ def verify_2fa(data: dict):
     
     temporal_token = data.get("temporal_token")
     codigo = data.get("codigo")
-    recordar_dispositivo = data.get("recordar_dispositivo", False)  # Nuevo campo
+    recordar_dispositivo = data.get("recordar_dispositivo", False)
+    
+    # ============================================
+    # LOG PARA DEPURAR
+    # ============================================
+    print(f"🔍 VERIFY-2FA - recordar_dispositivo: {recordar_dispositivo}")
     
     if not temporal_token or not codigo:
         raise HTTPException(status_code=400, detail="Faltan datos")
@@ -840,6 +860,7 @@ def verify_2fa(data: dict):
     
     # Si el usuario marcó "recordar dispositivo", guardar
     if recordar_dispositivo:
+        print(f"✅ Guardando dispositivo como confiable")
         update_data["dispositivo_confirmado"] = True
         update_data["fecha_dispositivo"] = datetime.now(CUBA_TZ).isoformat()
     
@@ -928,6 +949,7 @@ def desbloquear_usuario(data: dict, current_user=Depends(get_current_user)):
     supabase.table("intentos_fallidos").delete().eq("email", email).execute()
     
     return {"message": f"Usuario {email} desbloqueado"}
+
 @app.post("/api/auth/cambiar-2fa")
 def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
     supabase = get_supabase()
@@ -960,9 +982,7 @@ def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
     supabase.table("usuarios").update({
         "secret_2fa": nueva_clave,
         "codigo_2fa_personal": nuevo_codigo,
-        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat(),
-        "intentos_2fa": 0,
-        "bloqueado_2fa": False
+        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat()
     }).eq("id", current_user["id"]).execute()
     
     return {"message": "2FA actualizado correctamente"}
