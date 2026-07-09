@@ -1071,6 +1071,16 @@ def abrir_caja(data: dict, current_user=Depends(get_current_user)):
     saldo_inicial = data.get("saldo_inicial", 0)
     observaciones = data.get("observaciones", "")
     
+    # Verificar si ya existe una caja abierta
+    sesion_existente = supabase.table("sesiones_caja")\
+        .select("id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .execute()
+    
+    if sesion_existente.data:
+        raise HTTPException(status_code=400, detail="Ya hay una caja abierta")
+    
     # Crear o obtener caja
     caja = supabase.table("cajas")\
         .select("id")\
