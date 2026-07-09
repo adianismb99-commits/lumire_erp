@@ -21,6 +21,13 @@ from notificaciones import enviar_correo
 app = FastAPI(title="LUMIRE ERP API", version="1.0.0")
 
 # ============================================
+# CONFIGURACIÓN DE SEGURIDAD
+# ============================================
+
+SECRET_KEY = "lumire-super-secret-key-cambiar-en-produccion"
+ALGORITHM = "HS256"
+
+# ============================================
 # CORS
 # ============================================
 
