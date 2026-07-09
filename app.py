@@ -978,3 +978,239 @@ def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
     }).eq("id", current_user["id"]).execute()
     
     return {"message": "2FA actualizado correctamente"}
+
+# ============================================
+# ENDPOINTS PARA CIERRE DE CAJA
+# ============================================
+
+@app.get("/api/caja/estado")
+def get_caja_estado(current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .order("fecha_apertura", desc=True)\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        return {"estado": "cerrada", "sesion": None, "ventas_hoy": 0, "gastos_hoy": 0, "saldo_esperado": 0, "saldo_real": 0, "gastos": []}
+    
+    sesion_data = sesion.data[0]
+    sesion_id = sesion_data["id"]
+    
+    # Obtener ventas del día
+    hoy = datetime.now(CUBA_TZ).date().isoformat()
+    ventas = supabase.table("ventas")\
+        .select("total")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .gte("fecha", hoy)\
+        .execute()
+    
+    total_ventas = sum(v["total"] for v in ventas.data)
+    
+    # Obtener gastos de la sesión
+    gastos = supabase.table("gastos_caja")\
+        .select("*")\
+        .eq("sesion_caja_id", sesion_id)\
+        .execute()
+    
+    total_gastos = sum(g["monto"] for g in gastos.data) if gastos.data else 0
+    
+    # Saldo esperado
+    saldo_inicial = sesion_data.get("saldo_inicial", 0)
+    saldo_esperado = saldo_inicial + total_ventas - total_gastos
+    
+    return {
+        "estado": "abierta",
+        "sesion": sesion_data,
+        "ventas_hoy": total_ventas,
+        "gastos_hoy": total_gastos,
+        "saldo_esperado": saldo_esperado,
+        "saldo_real": sesion_data.get("saldo_real", 0),
+        "gastos": gastos.data if gastos.data else []
+    }
+
+@app.post("/api/caja/abrir")
+def abrir_caja(data: dict, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    saldo_inicial = data.get("saldo_inicial", 0)
+    observaciones = data.get("observaciones", "")
+    
+    nueva = supabase.table("sesiones_caja").insert({
+        "caja_id": 1,
+        "usuario_id": current_user["id"],
+        "saldo_inicial": saldo_inicial,
+        "estado": "abierta",
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    
+    return {"message": "Caja abierta", "id": nueva.data[0]["id"]}
+
+@app.post("/api/caja/cerrar")
+def cerrar_caja(data: dict, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    saldo_real = data.get("saldo_real")
+    observaciones = data.get("observaciones", "")
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .order("fecha_apertura", desc=True)\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        raise HTTPException(status_code=404, detail="No hay caja abierta")
+    
+    sesion_id = sesion.data[0]["id"]
+    saldo_inicial = sesion.data[0]["saldo_inicial"]
+    
+    # Calcular ventas del día
+    hoy = datetime.now(CUBA_TZ).date().isoformat()
+    ventas = supabase.table("ventas")\
+        .select("total")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .gte("fecha", hoy)\
+        .execute()
+    total_ventas = sum(v["total"] for v in ventas.data)
+    
+    # Calcular gastos
+    gastos = supabase.table("gastos_caja")\
+        .select("monto")\
+        .eq("sesion_caja_id", sesion_id)\
+        .execute()
+    total_gastos = sum(g["monto"] for g in gastos.data) if gastos.data else 0
+    
+    saldo_esperado = saldo_inicial + total_ventas - total_gastos
+    diferencia = saldo_real - saldo_esperado
+    
+    # Cerrar sesión
+    supabase.table("sesiones_caja").update({
+        "fecha_cierre": datetime.now(CUBA_TZ).isoformat(),
+        "saldo_esperado": saldo_esperado,
+        "saldo_real": saldo_real,
+        "diferencia": diferencia,
+        "estado": "cerrada",
+        "observaciones": observaciones
+    }).eq("id", sesion_id).execute()
+    
+    return {
+        "message": "Caja cerrada",
+        "saldo_esperado": saldo_esperado,
+        "saldo_real": saldo_real,
+        "diferencia": diferencia
+    }
+
+@app.post("/api/caja/gasto")
+def agregar_gasto(data: dict, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        raise HTTPException(status_code=404, detail="No hay caja abierta")
+    
+    nuevo = supabase.table("gastos_caja").insert({
+        "sesion_caja_id": sesion.data[0]["id"],
+        "concepto": data.get("concepto"),
+        "monto": data.get("monto"),
+        "categoria": data.get("categoria", "otros"),
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    
+    return {"message": "Gasto registrado", "id": nuevo.data[0]["id"]}
+
+@app.get("/api/caja/historial")
+def get_historial_caja(current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    historial = supabase.table("sesiones_caja")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "cerrada")\
+        .order("fecha_cierre", desc=True)\
+        .limit(30)\
+        .execute()
+    
+    return historial.data
+
+@app.get("/api/caja/resumen")
+def get_resumen_cierre(current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        raise HTTPException(status_code=404, detail="No hay caja abierta")
+    
+    sesion_id = sesion.data[0]["id"]
+    saldo_inicial = sesion.data[0]["saldo_inicial"]
+    
+    # Ventas del día
+    hoy = datetime.now(CUBA_TZ).date().isoformat()
+    ventas = supabase.table("ventas")\
+        .select("total")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .gte("fecha", hoy)\
+        .execute()
+    total_ventas = sum(v["total"] for v in ventas.data)
+    
+    # Gastos
+    gastos = supabase.table("gastos_caja")\
+        .select("monto")\
+        .eq("sesion_caja_id", sesion_id)\
+        .execute()
+    total_gastos = sum(g["monto"] for g in gastos.data) if gastos.data else 0
+    
+    return {
+        "saldo_inicial": saldo_inicial,
+        "ventas": total_ventas,
+        "gastos": total_gastos,
+        "saldo_esperado": saldo_inicial + total_ventas - total_gastos
+    }
+
+@app.post("/api/caja/ingreso-extra")
+def agregar_ingreso_extra(data: dict, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    
+    # Buscar sesión abierta
+    sesion = supabase.table("sesiones_caja")\
+        .select("id")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("estado", "abierta")\
+        .limit(1)\
+        .execute()
+    
+    if not sesion.data:
+        raise HTTPException(status_code=404, detail="No hay caja abierta")
+    
+    # Registrar como ingreso extra (gasto negativo)
+    nuevo = supabase.table("gastos_caja").insert({
+        "sesion_caja_id": sesion.data[0]["id"],
+        "concepto": data.get("concepto"),
+        "monto": -data.get("monto"),  # Negativo para indicar ingreso extra
+        "categoria": "ingreso_extra",
+        "empresa_id": current_user["empresa_id"]
+    }).execute()
+    
+    return {"message": "Ingreso extra registrado", "id": nuevo.data[0]["id"]}
