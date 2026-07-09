@@ -1,6 +1,12 @@
+import pytz
 import os
 from supabase import create_client, Client
+from datetime import datetime
 
+CUBA_TZ = pytz.timezone('America/Havana')
+
+# Para guardar timestamps
+timestamp_cuba = datetime.now(CUBA_TZ).isoformat()
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_ANON_KEY")
 

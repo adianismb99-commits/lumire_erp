@@ -1,16 +1,30 @@
+import pytz
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_supabase
+from datetime import datetime, timedelta
 
+CUBA_TZ = pytz.timezone('America/Havana')
 SECRET_KEY = "lumire-super-secret-key-cambiar-en-produccion"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(CUBA_TZ) + expires_delta
+    else:
+        expire = datetime.now(CUBA_TZ) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire.astimezone(pytz.UTC)})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
 
 # ============================================
 # CONFIGURACIÓN DE BLOQUEOS

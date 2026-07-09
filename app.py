@@ -1,6 +1,7 @@
 import os
 import random
 import string
+import pytz 
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,16 @@ from auth import (
 from routes import productos, ventas, inventario, empleados, reportes
 from database import get_supabase
 from notificaciones import enviar_correo
+
+# ============================================
+# CONFIGURACIÓN DE ZONA HORARIA (Cuba)
+# ============================================
+
+CUBA_TZ = pytz.timezone('America/Havana')
+
+def get_cuba_time():
+    """Retorna la hora actual en Cuba (UTC-4 o UTC-5 según temporada)"""
+    return datetime.now(CUBA_TZ)
 
 # ============================================
 # CONFIGURACIÓN DE LA APP
@@ -138,7 +149,7 @@ def login(usuario: dict, request: Request):
         temp_token_data = {
             "sub": str(user["id"]),
             "temporal": True,
-            "exp": datetime.utcnow() + timedelta(minutes=5)
+            "exp": (datetime.now(CUBA_TZ) + timedelta(minutes=5)).astimezone(pytz.UTC)
         }
         temp_token = jwt.encode(temp_token_data, SECRET_KEY, algorithm=ALGORITHM)
         
@@ -297,7 +308,7 @@ def forgot_password(request: dict):
     user_id = user.data[0]["id"]
     token_data = {
         "sub": str(user_id),
-        "exp": datetime.utcnow() + timedelta(minutes=RECOVERY_EXPIRE_MINUTES)
+        "exp": datetime.now(CUBA_TZ) + timedelta(minutes=RECOVERY_EXPIRE_MINUTES)
     }
     token = jwt.encode(token_data, RECOVERY_SECRET, algorithm=RECOVERY_ALGORITHM)
     
@@ -740,7 +751,7 @@ def enable_2fa_personal(data: dict, current_user=Depends(get_current_user)):
         "secret_2fa": clave_secreta,
         "2fa_habilitado": True,
         "codigo_2fa_personal": codigo_verificacion,
-        "ultima_verificacion_2fa": datetime.utcnow().isoformat()
+        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat()
     }).eq("id", current_user["id"]).execute()
     
     return {"message": "2FA activado correctamente"}
@@ -805,7 +816,7 @@ def verify_2fa(data: dict):
     
     # ✅ Código correcto: actualizar última verificación
     supabase.table("usuarios").update({
-        "ultima_verificacion_2fa": datetime.utcnow().isoformat()
+        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat()
     }).eq("id", user_id).execute()
     
     # Generar token final
@@ -923,7 +934,7 @@ def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
     supabase.table("usuarios").update({
         "secret_2fa": nueva_clave,
         "codigo_2fa_personal": nuevo_codigo,
-        "ultima_verificacion_2fa": datetime.utcnow().isoformat(),
+        "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat(),
         "intentos_2fa": 0,
         "bloqueado_2fa": False
     }).eq("id", current_user["id"]).execute()
