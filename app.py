@@ -985,12 +985,16 @@ def cambiar_2fa(data: dict, current_user=Depends(get_current_user)):
 
 @app.get("/api/caja/estado")
 def get_caja_estado(current_user=Depends(get_current_user)):
-    supabase = get_supabase()
+    from database import get_supabase
+    from datetime import datetime, timedelta
+    import pytz
     
-    # Buscar sesión abierta
+    supabase = get_supabase()
+    CUBA_TZ = pytz.timezone('America/Havana')
+    
+    # Buscar sesión abierta (sin empresa_id por ahora)
     sesion = supabase.table("sesiones_caja")\
         .select("*")\
-        .eq("empresa_id", current_user["empresa_id"])\
         .eq("estado", "abierta")\
         .order("fecha_apertura", desc=True)\
         .limit(1)\
@@ -1006,11 +1010,10 @@ def get_caja_estado(current_user=Depends(get_current_user)):
     hoy = datetime.now(CUBA_TZ).date().isoformat()
     ventas = supabase.table("ventas")\
         .select("total")\
-        .eq("empresa_id", current_user["empresa_id"])\
         .gte("fecha", hoy)\
         .execute()
     
-    total_ventas = sum(v["total"] for v in ventas.data)
+    total_ventas = sum(v["total"] for v in ventas.data) if ventas.data else 0
     
     # Obtener gastos de la sesión
     gastos = supabase.table("gastos_caja")\
