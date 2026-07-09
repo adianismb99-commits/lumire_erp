@@ -28,11 +28,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://lumire-erp-frontend.onrender.com",
-        "https://lumire-erp-docker.onrender.com",
         "http://localhost:8000"
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
