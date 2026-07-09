@@ -839,8 +839,6 @@ def verify_2fa(data: dict):
     # ✅ Código correcto: actualizar última verificación
     update_data = {
         "ultima_verificacion_2fa": datetime.now(CUBA_TZ).isoformat(),
-        "intentos_2fa": 0,
-        "bloqueado_2fa": False
     }
     
     # Si el usuario marcó "recordar dispositivo", guardar
