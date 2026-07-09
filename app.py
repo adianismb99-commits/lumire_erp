@@ -36,11 +36,11 @@ app.add_middleware(
 # ROUTERS
 # ============================================
 
-#app.include_router(productos.router, prefix="/api/productos", tags=["Productos"])
-#app.include_router(ventas.router, prefix="/api/ventas", tags=["Ventas"])
-#app.include_router(inventario.router, prefix="/api/inventario", tags=["Inventario"])
-#app.include_router(empleados.router, prefix="/api/empleados", tags=["Empleados"])
-#app.include_router(reportes.router, prefix="/api/reportes", tags=["Reportes"])
+app.include_router(productos.router, prefix="/api/productos", tags=["Productos"])
+app.include_router(ventas.router, prefix="/api/ventas", tags=["Ventas"])
+app.include_router(inventario.router, prefix="/api/inventario", tags=["Inventario"])
+app.include_router(empleados.router, prefix="/api/empleados", tags=["Empleados"])
+app.include_router(reportes.router, prefix="/api/reportes", tags=["Reportes"])
 
 # ============================================
 # ENDPOINTS BÁSICOS
