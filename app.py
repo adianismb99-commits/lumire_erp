@@ -6,10 +6,14 @@ import qrcode
 import base64
 from io import BytesIO
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt
-from auth import get_current_user, has_permission, authenticate_user, create_access_token, get_password_hash, verify_password
+from auth import (
+    get_current_user, has_permission, authenticate_user, 
+    create_access_token, get_password_hash, verify_password,
+    registrar_intento_fallido, verificar_bloqueo, limpiar_intentos
+)
 from routes import productos, ventas, inventario, empleados, reportes
 from database import get_supabase
 from notificaciones import enviar_correo
@@ -84,22 +88,54 @@ def get_usuarios_public():
     usuarios_filtrados = [u for u in response.data if u.get("email") != "admin@lumire.com"]
     return usuarios_filtrados
 
+# ============================================
+# LOGIN CON BLOQUEO POR INTENTOS FALLIDOS
+# ============================================
+
 @app.post("/api/login")
-def login(usuario: dict):
+def login(usuario: dict, request: Request):
     from auth import authenticate_user, create_access_token
     
     email = usuario.get("email")
     password = usuario.get("password")
     empresa_id = usuario.get("empresa_id")
     
+    # Obtener IP y user_agent para auditoría
+    ip = request.client.host
+    user_agent = request.headers.get("user-agent", "Desconocido")
+    
+    # 1. Verificar bloqueos
+    bloqueo = verificar_bloqueo(email)
+    if bloqueo["bloqueado"]:
+        raise HTTPException(status_code=403, detail=bloqueo["motivo"])
+    
+    # 2. Autenticar
     user = authenticate_user(email, password)
     if not user:
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+        # Registrar intento fallido
+        resultado = registrar_intento_fallido(email, ip, user_agent)
+        
+        if resultado == "permanente":
+            raise HTTPException(status_code=403, detail="⚠️ Cuenta bloqueada permanentemente. Contacta al administrador.")
+        elif isinstance(resultado, int):
+            intentos = resultado
+            from auth import MAX_INTENTOS_BLOQUEO
+            restantes = MAX_INTENTOS_BLOQUEO - intentos
+            if restantes > 0:
+                raise HTTPException(status_code=401, detail=f"Credenciales incorrectas. Te quedan {restantes} intentos antes del bloqueo.")
+            else:
+                raise HTTPException(status_code=403, detail=f"⚠️ Demasiados intentos fallidos. Cuenta bloqueada por 30 minutos.")
+        else:
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     
+    # 3. Si la autenticación es exitosa, limpiar los intentos fallidos
+    limpiar_intentos(email)
+    
+    # 4. Verificar si el usuario pertenece a la empresa
     if user["empresa_id"] != empresa_id:
         raise HTTPException(status_code=401, detail="Usuario no pertenece a esta empresa")
     
-    # Verificar si tiene 2FA activado
+    # 5. Verificar si tiene 2FA activado
     if user.get("2fa_habilitado"):
         # Generar token temporal (expira en 5 minutos)
         temp_token_data = {
@@ -115,7 +151,7 @@ def login(usuario: dict):
             "message": "Se requiere verificación en dos pasos"
         }
     
-    # Si no tiene 2FA, devolver token normal
+    # 6. Si no tiene 2FA, devolver token normal
     access_token = create_access_token(data={
         "sub": str(user["id"]),
         "empresa_id": empresa_id,
@@ -145,6 +181,14 @@ def get_usuarios(current_user=Depends(get_current_user)):
 def get_usuario(usuario_id: int, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     usuario = supabase.table("usuarios").select("*").eq("id", usuario_id).eq("empresa_id", current_user["empresa_id"]).execute()
+    if not usuario.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return usuario.data[0]
+
+@app.get("/api/usuarios/me")
+def get_me(current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    usuario = supabase.table("usuarios").select("*").eq("id", current_user["id"]).eq("empresa_id", current_user["empresa_id"]).execute()
     if not usuario.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return usuario.data[0]
@@ -234,15 +278,6 @@ def cambiar_password(usuario_id: int, data: dict, current_user=Depends(get_curre
     supabase.table("usuarios").update({"password_hash": nueva_password}).eq("id", usuario_id).execute()
     
     return {"message": "Contraseña actualizada"}
-
-@app.get("/api/usuarios/me")
-def get_me(current_user=Depends(get_current_user)):
-    from database import get_supabase
-    supabase = get_supabase()
-    usuario = supabase.table("usuarios").select("*").eq("id", current_user["id"]).eq("empresa_id", current_user["empresa_id"]).execute()
-    if not usuario.data:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    return usuario.data[0]
 
 # ============================================
 # ENDPOINTS PARA RECUPERACIÓN DE CONTRASEÑA
@@ -507,7 +542,6 @@ def get_empleados(current_user=Depends(get_current_user)):
 def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     
-    # Datos obligatorios
     nombre = empleado.get("nombre")
     email = empleado.get("email")
     tipo = empleado.get("tipo", "Empleado")
@@ -515,11 +549,8 @@ def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
     comision_porcentaje = empleado.get("comision_porcentaje", 0)
     fecha_ingreso = empleado.get("fecha_ingreso")
     crear_usuario = empleado.get("crear_usuario", True)
-    
-    # Obtener empresa_id del usuario autenticado
     empresa_id = current_user["empresa_id"]
     
-    # Insertar empleado
     nuevo_empleado = supabase.table("empleados").insert({
         "nombre": nombre,
         "email": email,
@@ -527,7 +558,7 @@ def create_empleado(empleado: dict, current_user=Depends(get_current_user)):
         "salario_base": salario_base,
         "comision_porcentaje": comision_porcentaje,
         "fecha_ingreso": fecha_ingreso,
-        "empresa_id": empresa_id  # <--- Asegurar que este campo existe
+        "empresa_id": empresa_id
     }).execute()
         
     empleado_id = nuevo_empleado.data[0]["id"]
@@ -689,9 +720,7 @@ def calcular_nomina(empleado_id: int, mes: str, current_user=Depends(get_current
 
 @app.get("/api/nomina/historial")
 def get_nomina_historial(mes: str, current_user=Depends(get_current_user)):
-    from database import get_supabase
     supabase = get_supabase()
-    # Por ahora, devolvemos datos simulados
     return []
 
 # ============================================
@@ -702,7 +731,6 @@ def get_nomina_historial(mes: str, current_user=Depends(get_current_user)):
 def enable_2fa(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     
-    # Generar clave secreta si no existe
     secret = current_user.get("secret_2fa")
     if not secret:
         secret = pyotp.random_base32()
@@ -710,12 +738,10 @@ def enable_2fa(current_user=Depends(get_current_user)):
             "secret_2fa": secret
         }).eq("id", current_user["id"]).execute()
     
-    # Generar URL para el QR
     totp = pyotp.TOTP(secret)
     nombre_usuario = current_user.get("email", "usuario@lumire.com")
     qr_url = totp.provisioning_uri(nombre_usuario, issuer_name="LUMIRE ERP")
     
-    # Generar código QR en base64 (para mostrar en el frontend)
     qr = qrcode.make(qr_url)
     buffer = BytesIO()
     qr.save(buffer, format="PNG")
@@ -739,12 +765,10 @@ def confirm_2fa(data: dict, current_user=Depends(get_current_user)):
     if not secret:
         raise HTTPException(status_code=400, detail="No hay clave secreta configurada")
     
-    # Verificar el código
     totp = pyotp.TOTP(secret)
     if not totp.verify(codigo):
         raise HTTPException(status_code=400, detail="Código inválido")
     
-    # Activar 2FA
     supabase.table("usuarios").update({
         "2fa_habilitado": True,
         "ultima_verificacion_2fa": datetime.utcnow().isoformat()
@@ -775,7 +799,6 @@ def verify_2fa(data: dict):
     if not temporal_token or not codigo:
         raise HTTPException(status_code=400, detail="Faltan datos")
     
-    # Validar el temporal_token (contiene user_id)
     try:
         payload = jwt.decode(temporal_token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
@@ -786,14 +809,12 @@ def verify_2fa(data: dict):
     except jwt.JWTError:
         raise HTTPException(status_code=400, detail="Token inválido")
     
-    # Obtener usuario
     user = supabase.table("usuarios").select("*").eq("id", user_id).execute()
     if not user.data:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
     user_data = user.data[0]
     
-    # Verificar el código
     secret = user_data.get("secret_2fa")
     if not secret:
         raise HTTPException(status_code=400, detail="2FA no configurado para este usuario")
@@ -802,12 +823,10 @@ def verify_2fa(data: dict):
     if not totp.verify(codigo):
         raise HTTPException(status_code=400, detail="Código inválido")
     
-    # Actualizar última verificación
     supabase.table("usuarios").update({
         "ultima_verificacion_2fa": datetime.utcnow().isoformat()
     }).eq("id", user_id).execute()
     
-    # Generar token final
     access_token = create_access_token(data={
         "sub": str(user_data["id"]),
         "empresa_id": user_data["empresa_id"],
@@ -815,3 +834,78 @@ def verify_2fa(data: dict):
     })
     
     return {"access_token": access_token, "token_type": "bearer", "user": user_data}
+
+# ============================================
+# ENDPOINTS PARA PANEL DE SEGURIDAD OCULTO
+# ============================================
+
+@app.get("/api/seguridad/bloqueados")
+def get_bloqueados(current_user=Depends(get_current_user)):
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    supabase = get_supabase()
+    bloqueados = supabase.table("usuarios_bloqueados").select("*").order("fecha_bloqueo", desc=True).execute()
+    return bloqueados.data
+
+@app.get("/api/seguridad/intentos")
+def get_intentos(current_user=Depends(get_current_user)):
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    supabase = get_supabase()
+    hace_una_hora = (datetime.now() - timedelta(hours=1)).isoformat()
+    intentos = supabase.table("intentos_fallidos").select("*").gte("fecha", hace_una_hora).order("fecha", desc=True).execute()
+    return intentos.data
+
+@app.get("/api/seguridad/logs")
+def get_logs(current_user=Depends(get_current_user)):
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    supabase = get_supabase()
+    try:
+        logs = supabase.table("logs_auditoria").select("*, usuarios(email)").order("fecha", desc=True).limit(50).execute()
+        return logs.data
+    except:
+        return []
+
+@app.get("/api/seguridad/resumen")
+def get_resumen(current_user=Depends(get_current_user)):
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    supabase = get_supabase()
+    
+    usuarios = supabase.table("usuarios").select("id").execute()
+    total_usuarios = len(usuarios.data)
+    
+    bloqueados = supabase.table("usuarios_bloqueados").select("id").execute()
+    total_bloqueados = len(bloqueados.data)
+    
+    hoy = datetime.now().date().isoformat()
+    intentos = supabase.table("intentos_fallidos").select("id").gte("fecha", hoy).execute()
+    total_intentos = len(intentos.data)
+    
+    return {
+        "total_usuarios": total_usuarios,
+        "total_bloqueados": total_bloqueados,
+        "total_intentos": total_intentos,
+        "total_activos": 0
+    }
+
+@app.post("/api/seguridad/desbloquear")
+def desbloquear_usuario(data: dict, current_user=Depends(get_current_user)):
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email requerido")
+    
+    supabase = get_supabase()
+    
+    supabase.table("usuarios_bloqueados").delete().eq("email", email).execute()
+    supabase.table("intentos_fallidos").delete().eq("email", email).execute()
+    
+    return {"message": f"Usuario {email} desbloqueado"}
