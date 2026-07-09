@@ -1,6 +1,3 @@
-import os
-from datetime import datetime, timedelta
-from database import get_supabase
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -10,10 +7,22 @@ from database import get_supabase
 
 SECRET_KEY = "lumire-super-secret-key-cambiar-en-produccion"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 horas
+ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
+
+# ============================================
+# CONFIGURACIÓN DE BLOQUEOS
+# ============================================
+
+BLOQUEO_TIEMPO_MIN = 30
+MAX_INTENTOS_BLOQUEO = 3
+MAX_INTENTOS_PERMANENTE = 5
+
+# ============================================
+# FUNCIONES DE AUTENTICACIÓN
+# ============================================
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -59,7 +68,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="Usuario no encontrado")
     
     user_data = user.data[0]
-    user_data["empresa_id"] = empresa_id  # Forzar empresa desde el token
+    user_data["empresa_id"] = empresa_id
     
     return user_data
 
@@ -75,21 +84,15 @@ def has_permission(user, modulo: str, accion: str):
     return False
 
 # ============================================
-# BLOQUEO POR INTENTOS FALLIDOS
+# FUNCIONES DE BLOQUEO POR INTENTOS FALLIDOS
 # ============================================
-
-BLOQUEO_TIEMPO_MIN = 30  # minutos
-MAX_INTENTOS_BLOQUEO = 3
-MAX_INTENTOS_PERMANENTE = 5
 
 def registrar_intento_fallido(email: str, ip: str = None, user_agent: str = None):
     supabase = get_supabase()
     
-    # Verificar si ya existe registro para este email
     existing = supabase.table("intentos_fallidos").select("*").eq("email", email).execute()
     
     if existing.data:
-        # Actualizar contador
         nuevo_intento = existing.data[0]["intentos"] + 1
         supabase.table("intentos_fallidos").update({
             "intentos": nuevo_intento,
@@ -98,9 +101,7 @@ def registrar_intento_fallido(email: str, ip: str = None, user_agent: str = None
             "user_agent": user_agent
         }).eq("email", email).execute()
         
-        # Verificar si alcanzó el límite para bloqueo permanente
         if nuevo_intento >= MAX_INTENTOS_PERMANENTE:
-            # Bloquear permanentemente
             supabase.table("usuarios_bloqueados").insert({
                 "email": email,
                 "motivo": f"5 intentos fallidos consecutivos",
@@ -110,7 +111,6 @@ def registrar_intento_fallido(email: str, ip: str = None, user_agent: str = None
         
         return nuevo_intento
     else:
-        # Nuevo registro
         supabase.table("intentos_fallidos").insert({
             "email": email,
             "ip": ip,
@@ -123,12 +123,10 @@ def registrar_intento_fallido(email: str, ip: str = None, user_agent: str = None
 def verificar_bloqueo(email: str):
     supabase = get_supabase()
     
-    # 1. Verificar bloqueo permanente
     bloqueado = supabase.table("usuarios_bloqueados").select("*").eq("email", email).execute()
     if bloqueado.data:
-        return {"bloqueado": True, "motivo": "Bloqueado permanentemente por múltiples intentos fallidos", "permanente": True}
+        return {"bloqueado": True, "motivo": "⚠️ Cuenta bloqueada permanentemente. Contacta al administrador.", "permanente": True}
     
-    # 2. Verificar intentos fallidos (bloqueo temporal)
     intentos = supabase.table("intentos_fallidos").select("*").eq("email", email).execute()
     if intentos.data:
         datos = intentos.data[0]
@@ -139,9 +137,17 @@ def verificar_bloqueo(email: str):
         if intentos_count >= MAX_INTENTOS_BLOQUEO and tiempo_pasado < BLOQUEO_TIEMPO_MIN:
             return {
                 "bloqueado": True,
-                "motivo": f"Demasiados intentos fallidos. Bloqueado por {BLOQUEO_TIEMPO_MIN} minutos",
+                "motivo": f"⚠️ Demasiados intentos fallidos. Cuenta bloqueada por {BLOQUEO_TIEMPO_MIN} minutos.",
                 "restante": round(BLOQUEO_TIEMPO_MIN - tiempo_pasado),
                 "permanente": False
             }
     
     return {"bloqueado": False}
+
+def limpiar_intentos(email: str):
+    """
+    Elimina todos los intentos fallidos registrados para un email.
+    Se usa cuando el usuario inicia sesión correctamente.
+    """
+    supabase = get_supabase()
+    supabase.table("intentos_fallidos").delete().eq("email", email).execute()
