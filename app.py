@@ -1412,3 +1412,343 @@ def agregar_movimiento_venta(data: dict, current_user=Depends(get_current_user))
     }).execute()
     
     return {"message": "Movimiento registrado"}
+# ============================================
+# ENDPOINTS PARA SISTEMA DE MÓDULOS
+# ============================================
+
+@app.get("/api/modulos/")
+def get_modulos(current_user=Depends(get_current_user)):
+    """Obtener todos los módulos disponibles"""
+    supabase = get_supabase()
+    modulos = supabase.table("modulos").select("*").order("id").execute()
+    return modulos.data
+
+@app.get("/api/modulos/activos")
+def get_modulos_activos(current_user=Depends(get_current_user)):
+    """Obtener módulos activos para la empresa del usuario"""
+    supabase = get_supabase()
+    
+    # Obtener módulos activos para esta empresa
+    empresa_modulos = supabase.table("empresa_modulos")\
+        .select("modulo_id, modulos(*)")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("activo", True)\
+        .execute()
+    
+    # Extraer los datos de los módulos
+    modulos_activos = []
+    for em in empresa_modulos.data:
+        if em.get("modulos"):
+            modulos_activos.append(em["modulos"])
+    
+    return modulos_activos
+
+@app.get("/api/modulos/empresa")
+def get_modulos_empresa(current_user=Depends(get_current_user)):
+    """Obtener configuración de módulos para la empresa"""
+    supabase = get_supabase()
+    
+    modulos = supabase.table("empresa_modulos")\
+        .select("*, modulos(*)")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
+    return modulos.data
+
+@app.post("/api/modulos/activar")
+def activar_modulo(data: dict, current_user=Depends(get_current_user)):
+    """Activar o desactivar un módulo para la empresa"""
+    if current_user["rol_id"] != 1:  # Solo ADMIN
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    supabase = get_supabase()
+    
+    modulo_id = data.get("modulo_id")
+    activo = data.get("activo", True)
+    empresa_id = current_user["empresa_id"]
+    
+    if not modulo_id:
+        raise HTTPException(status_code=400, detail="modulo_id es requerido")
+    
+    # Verificar si ya existe
+    existing = supabase.table("empresa_modulos")\
+        .select("id")\
+        .eq("empresa_id", empresa_id)\
+        .eq("modulo_id", modulo_id)\
+        .execute()
+    
+    if existing.data:
+        # Actualizar
+        result = supabase.table("empresa_modulos")\
+            .update({"activo": activo})\
+            .eq("id", existing.data[0]["id"])\
+            .execute()
+    else:
+        # Crear
+        result = supabase.table("empresa_modulos").insert({
+            "empresa_id": empresa_id,
+            "modulo_id": modulo_id,
+            "activo": activo
+        }).execute()
+    
+    return {"message": f"Módulo {'activado' if activo else 'desactivado'}", "id": result.data[0]["id"]}
+
+@app.post("/api/modulos/configurar")
+def configurar_modulo(data: dict, current_user=Depends(get_current_user)):
+    """Configurar un módulo (guardar configuración JSON)"""
+    if current_user["rol_id"] != 1:
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    
+    supabase = get_supabase()
+    
+    modulo_id = data.get("modulo_id")
+    configuracion = data.get("configuracion", {})
+    empresa_id = current_user["empresa_id"]
+    
+    if not modulo_id:
+        raise HTTPException(status_code=400, detail="modulo_id es requerido")
+    
+    existing = supabase.table("empresa_modulos")\
+        .select("id")\
+        .eq("empresa_id", empresa_id)\
+        .eq("modulo_id", modulo_id)\
+        .execute()
+    
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Módulo no encontrado para esta empresa")
+    
+    result = supabase.table("empresa_modulos")\
+        .update({"configuracion": configuracion})\
+        .eq("id", existing.data[0]["id"])\
+        .execute()
+    
+    return {"message": "Configuración guardada"}
+
+@app.get("/api/modulos/menu")
+def get_menu(current_user=Depends(get_current_user)):
+    """Obtener menú dinámico con solo los módulos activos"""
+    supabase = get_supabase()
+    
+    # Obtener módulos activos para esta empresa
+    empresa_modulos = supabase.table("empresa_modulos")\
+        .select("modulo_id, modulos(codigo, nombre, icono, ruta)")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("activo", True)\
+        .execute()
+    
+    menu = []
+    for em in empresa_modulos.data:
+        if em.get("modulos"):
+            m = em["modulos"]
+            menu.append({
+                "codigo": m.get("codigo"),
+                "nombre": m.get("nombre"),
+                "icono": m.get("icono"),
+                "ruta": m.get("ruta")
+            })
+    
+    return menu
+
+# ============================================
+# ENDPOINTS PARA CLIENTES (CRM)
+# ============================================
+
+@app.get("/api/clientes/")
+def get_clientes(current_user=Depends(get_current_user)):
+    """Obtener todos los clientes de la empresa"""
+    supabase = get_supabase()
+    clientes = supabase.table("clientes")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .order("nombre")\
+        .execute()
+    return clientes.data
+
+@app.get("/api/clientes/{cliente_id}")
+def get_cliente(cliente_id: int, current_user=Depends(get_current_user)):
+    """Obtener un cliente específico"""
+    supabase = get_supabase()
+    cliente = supabase.table("clientes")\
+        .select("*")\
+        .eq("id", cliente_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    if not cliente.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    return cliente.data[0]
+
+@app.get("/api/clientes/{cliente_id}/historial")
+def get_cliente_historial(cliente_id: int, current_user=Depends(get_current_user)):
+    """Obtener historial de un cliente"""
+    supabase = get_supabase()
+    
+    # Verificar que el cliente pertenece a la empresa
+    cliente = supabase.table("clientes")\
+        .select("id")\
+        .eq("id", cliente_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    if not cliente.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    
+    historial = supabase.table("clientes_historial")\
+        .select("*")\
+        .eq("cliente_id", cliente_id)\
+        .order("fecha", desc=True)\
+        .limit(50)\
+        .execute()
+    
+    # También obtener ventas del cliente
+    ventas = supabase.table("ventas")\
+        .select("id, total, fecha, cliente_nombre")\
+        .eq("cliente_nombre", cliente.data[0]["nombre"])\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .order("fecha", desc=True)\
+        .limit(20)\
+        .execute()
+    
+    return {
+        "historial": historial.data,
+        "ventas": ventas.data
+    }
+
+@app.post("/api/clientes/")
+def create_cliente(data: dict, current_user=Depends(get_current_user)):
+    """Crear un nuevo cliente"""
+    supabase = get_supabase()
+    
+    nuevo = supabase.table("clientes").insert({
+        "empresa_id": current_user["empresa_id"],
+        "tipo": data.get("tipo", "persona"),
+        "documento": data.get("documento"),
+        "nombre": data.get("nombre"),
+        "email": data.get("email"),
+        "telefono": data.get("telefono"),
+        "direccion": data.get("direccion"),
+        "ciudad": data.get("ciudad"),
+        "pais": data.get("pais", "Cuba"),
+        "codigo_postal": data.get("codigo_postal"),
+        "notas": data.get("notas"),
+        "activo": data.get("activo", True)
+    }).execute()
+    
+    # Registrar en historial
+    supabase.table("clientes_historial").insert({
+        "cliente_id": nuevo.data[0]["id"],
+        "tipo": "creacion",
+        "descripcion": "Cliente creado"
+    }).execute()
+    
+    return nuevo.data[0]
+
+@app.put("/api/clientes/{cliente_id}")
+def update_cliente(cliente_id: int, data: dict, current_user=Depends(get_current_user)):
+    """Actualizar un cliente"""
+    supabase = get_supabase()
+    
+    # Verificar que existe
+    existing = supabase.table("clientes")\
+        .select("id")\
+        .eq("id", cliente_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    
+    update_data = {}
+    campos = ["tipo", "documento", "nombre", "email", "telefono", "direccion", 
+              "ciudad", "pais", "codigo_postal", "notas", "activo"]
+    for campo in campos:
+        if campo in data:
+            update_data[campo] = data[campo]
+    
+    update_data["updated_at"] = datetime.now(CUBA_TZ).isoformat()
+    
+    result = supabase.table("clientes")\
+        .update(update_data)\
+        .eq("id", cliente_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
+    # Registrar en historial
+    supabase.table("clientes_historial").insert({
+        "cliente_id": cliente_id,
+        "tipo": "actualizacion",
+        "descripcion": "Datos actualizados"
+    }).execute()
+    
+    return result.data[0]
+
+@app.delete("/api/clientes/{cliente_id}")
+def delete_cliente(cliente_id: int, current_user=Depends(get_current_user)):
+    """Eliminar un cliente (desactivar)"""
+    supabase = get_supabase()
+    
+    # En lugar de eliminar, desactivar
+    result = supabase.table("clientes")\
+        .update({"activo": False})\
+        .eq("id", cliente_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    
+    return {"message": "Cliente desactivado"}
+
+@app.post("/api/clientes/{cliente_id}/historial")
+def add_cliente_historial(cliente_id: int, data: dict, current_user=Depends(get_current_user)):
+    """Agregar entrada al historial del cliente"""
+    supabase = get_supabase()
+    
+    # Verificar que existe
+    cliente = supabase.table("clientes")\
+        .select("id")\
+        .eq("id", cliente_id)\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .execute()
+    if not cliente.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    
+    nuevo = supabase.table("clientes_historial").insert({
+        "cliente_id": cliente_id,
+        "tipo": data.get("tipo", "nota"),
+        "descripcion": data.get("descripcion")
+    }).execute()
+    
+    return nuevo.data[0]
+
+@app.get("/api/clientes/buscar")
+def buscar_clientes(q: str = "", current_user=Depends(get_current_user)):
+    """Buscar clientes por nombre, email o teléfono"""
+    supabase = get_supabase()
+    
+    if not q or len(q) < 2:
+        return []
+    
+    # Buscar por nombre, email o teléfono
+    clientes = supabase.table("clientes")\
+        .select("*")\
+        .eq("empresa_id", current_user["empresa_id"])\
+        .eq("activo", True)\
+        .ilike("nombre", f"%{q}%")\
+        .execute()
+    
+    # Si no hay resultados, buscar por email o teléfono
+    if not clientes.data:
+        clientes = supabase.table("clientes")\
+            .select("*")\
+            .eq("empresa_id", current_user["empresa_id"])\
+            .eq("activo", True)\
+            .ilike("email", f"%{q}%")\
+            .execute()
+    
+    if not clientes.data:
+        clientes = supabase.table("clientes")\
+            .select("*")\
+            .eq("empresa_id", current_user["empresa_id"])\
+            .eq("activo", True)\
+            .ilike("telefono", f"%{q}%")\
+            .execute()
+    
+    return clientes.data[:20]  # Limitar a 20 resultados
